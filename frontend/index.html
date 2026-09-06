@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Partis — Editor de partituras con IA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/abcjs@6.7.0/abcjs-audio.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===================== TOP BAR ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="1200 150 650 900" xmlns="http://www.w3.org/2000/svg">
+          <path d="M1448 240.3c-9 3.7-17.8 10.4-30 22.6-21.4 21.5-33.4 43.4-42.1 76.9-7.8 30.2-8.1 69.6-.8 121.6 1.8 13.3 1.8 14.1.1 15.9-.9 1.1-9.6 8.5-19.2 16.5-65.5 54.5-95.2 91.1-111.9 138.7-6.8 19-10 45.1-8.1 65.2 2.1 22.8 6.5 39.2 15.4 57.9 24.3 50.7 70 82.9 130.1 91.9 10.7 1.6 39.5 1.9 50 .6 3.3-.5 6.1-.8 6.1-.7.1.1 2.1 12 4.5 26.6 3.8 23.3 4.3 28.4 4.4 42.5 0 15-.2 16.6-2.9 24.9-7.1 21.5-23.8 37.4-45.6 43.3-11.8 3.2-30.6 1.8-39.4-2.9-1.6-.9-1.1-1.3 3.7-3.3 17.3-7 27.7-23.2 27.7-42.9-.1-24.1-18.1-44.2-42.9-47.8-7-1-9.4-1-16 .4-11.9 2.4-18.5 6-27.1 14.7-11.7 11.7-17 25-17 42.3 0 26.7 15.3 49.5 43.4 64.4 25.8 13.7 52.7 15.9 82 6.7 35.5-11.2 61-39 68.8-75.1 2.8-13.2 2.8-33-.1-50.7-1.1-7.2-7-43-13.1-79.8-9.5-57.6-25-153.3-25-154.3 0-.9 8.1-.2 13.9 1.1 18.5 4.4 36.1 18.3 45.1 35.7 6 11.5 8.2 20.8 8.3 35.8.1 10.2-.3 14-2.2 20.5-3.5 12.5-10.4 24.7-18.9 33.5l-7.3 7.5 3.1 18.5c1.7 10.2 3.3 19 3.5 19.7.8 2.4 19-9.2 30.7-19.3 21.4-18.7 35.9-45 40.4-73.5 2.5-15.8 1.5-36.8-2.4-52.1-6.4-24.6-18.8-44.6-37.5-60.1-19.9-16.5-44-25.4-71.9-26.4l-14.6-.6-.4-2.6c-.3-1.4-3.1-17.4-6.3-35.5l-5.9-32.9 7.5-6.5c18.2-16 39.8-40.8 53.2-61.2 36.1-55.1 41.1-117 13.8-173.6-9.5-19.7-21.6-35.8-32.8-43.5-5-3.5-7.1-3.6-14.3-.6m14.8 68.1c4.2 2.2 7.9 6.6 10.8 13.1 2.5 5.3 2.9 7.5 3.2 18.2.3 9.1 0 14.1-1.3 20-5.6 25.1-23.7 53.8-49 77.4-8.6 7.9-15.8 14-16.1 13.6-1.1-1-3.4-28.1-3.4-39.2 0-34.7 8.9-66.3 24.5-86.5 10.9-14.1 23.3-20.7 31.3-16.6M1391.9 576c2.3 12.9 4.4 24.7 4.7 26.2.5 2.5 0 2.9-8.4 7.1-28.6 14.2-47.5 36.4-54.9 64.5-3.5 13.3-3.7 32.7-.4 44.7 5.6 20.6 18.1 36.6 36.7 47.1 6 3.4 20.1 8.7 21.6 8.2.4-.2-2.6-5.7-6.7-12.3-12.1-19.4-16.2-32.4-15.2-48.3.9-15.3 7.1-27.7 19.6-39.4 6.3-6 16.6-12.6 17.8-11.5.3.3 2.1 10.6 4 22.9 2 12.3 7.5 46.1 12.3 75.1 5.2 32.1 8.3 53 7.7 53.4-2.1 1.3-25 1.5-35.6.4-35.4-3.7-63.7-17.5-82.5-40.3-18-21.9-26.5-47-25.3-74.8 1.5-33.4 17.9-68.4 46.1-98.7 9.1-9.8 53.4-48.9 54.2-48 .1.1 2.1 10.8 4.3 23.7"/>
+          <path d="M1700.5 331.4c-29.4 17.4-80.2 48.1-85.6 51.8-1.9 1.4-12.5 14.3-23.5 28.8-59.7 78.6-123.4 163.2-123.4 163.9 0 .5 2.3 1.1 5.1 1.5s8.6 1.8 12.8 3.1c5.9 1.9 7.8 2.2 8.7 1.2 1.2-1.2 49.1-64.4 90.8-119.7 13.1-17.3 24.5-31.8 25.4-32.1 2.9-1.1 5.4.3 6.9 3.8 1.3 3.2 1.2 3.7-1.1 7.6-1.4 2.3-16.5 22.6-33.7 45.2-39.9 52.4-75.9 100.2-75.9 100.8 0 .3 3.7 2.6 8.3 5.1 14.6 8.3 28.1 20.4 41.3 37.1l3 3.9 66.7-88.6c36.7-48.8 67.5-90.4 68.6-92.5s6.8-23.2 12.6-46.8c12.5-50.7 21.5-87.7 21.5-88.7 0-2-4.2.2-28.5 14.6m-26.2 42c4.2 6.3 10.1 10.7 17.6 13.2 3.9 1.2 5.2 2.1 4.8 3.3-5.5 21.2-13.2 48.8-13.7 49.4-.4.4-5.9 1.6-12.2 2.5l-11.6 1.8-.5-5.4c-1.5-14.1-12.6-21.8-27.3-18.9l-4 .8-1.3-12.1c-.7-6.7-1-12.4-.7-12.7 1-1 44.1-27.3 44.7-27.3.3 0 2.2 2.4 4.2 5.4m-331.8-46.9c-59.9 11.1-122.9 43.4-169.5 86.9-19.5 18.2-40.5 43.6-55 66.8-8.6 13.6-22.3 41.1-28.7 57.4-34.5 87.9-30.2 186.9 11.7 272.2 17.3 35.3 36.2 62.2 63 89.6 22.3 22.9 36.6 34.5 62.5 51 12.5 8.1 40.3 23.2 41 22.4.1-.2-.6-4.4-1.6-9.3-4.4-21.5-1.1-44.2 9.2-62.2 1.7-3 2.7-5.8 2.3-6.2-.5-.4-6.3-4.3-12.8-8.6-16.5-10.8-30-21.8-44.7-36.5-21.8-21.8-36.8-42.7-50.4-70.5-9.8-19.8-14.1-31.2-18.9-49.6-19.8-75.2-7-152.9 35.5-216.4 20.6-30.8 48.8-58.1 80.4-78 18.8-11.9 48.9-24.9 70.8-30.5l8.7-2.3V393c0-17.1 3.4-42.8 7.9-60.8 1.1-3.9 1.6-7.4 1.2-7.6-.3-.2-6 .7-12.6 1.9m193.2 34.2c-.8 18.8-2.6 31.4-6.8 48.1-1.7 6.9-2.7 12.7-2.3 13.2 1.3 1.2 19.3 11 20.2 11 1.5 0 44.4-58 43.9-59.4-.8-2.1-17.7-11.8-35.1-20.1-8.3-4-16-7.6-17.2-7.9-2-.6-2.1-.3-2.7 15.1M1675 517.2l-24.3 32.2 1.6 4c.8 2.3 3.4 9 5.7 15.1 11.5 30 18 70.4 16.6 103.5-1.7 41.3-10.8 75.5-29.7 111.9-13.9 26.8-29.2 47.3-51.5 69.1-22 21.5-47.6 39.3-74.6 52l-11.5 5.4-.6 13.6c-1 22.3-7.1 42.3-18.7 61.5l-5.9 9.6 3.2-.6c8.7-1.8 29.6-8.2 41.7-12.7 32.2-12 61.1-28.3 91-51.4 14.1-10.8 45.9-42.3 56.6-55.9 73.6-93.4 94.6-212.6 57-323.1-3-8.8-8.2-22.1-11.6-29.6-6.7-14.7-18.1-36-19.7-36.5-.5-.2-11.9 14.1-25.3 31.9"/>
+        </svg>
+      </span>
+      <span class="brand-name">PARTIS</span>
+    </div>
+
+    <div class="topbar-center">
+      <div class="segmented" id="view-mode">
+        <button type="button" data-mode="page" class="is-active">Hoja</button>
+        <button type="button" data-mode="continuous">Seguida</button>
+      </div>
+
+      <div class="zoom-control">
+        <button type="button" id="zoom-out" title="Alejar">−</button>
+        <span id="zoom-label">100%</span>
+        <button type="button" id="zoom-in" title="Acercar">+</button>
+        <button type="button" id="zoom-fit" class="zoom-fit" title="Ajustar a la ventana">Ajustar</button>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <h1 id="score-title" class="score-title">Sin partitura</h1>
+      <button type="button" id="theme-toggle" class="icon-btn" title="Cambiar entre tema claro y oscuro">☾</button>
+      <div class="score-actions" id="score-actions" hidden>
+        <button type="button" id="download-musicxml">MusicXML</button>
+        <button type="button" id="download-midi">MIDI</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== WORKSPACE ===================== -->
+  <div class="workspace">
+    <nav class="rail" id="rail">
+      <button type="button" class="rail-btn" data-panel="panel-compose" title="Nueva composición">
+        <span class="rail-icon">✦</span><span class="rail-label">Crear</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-score" title="Opciones de partitura">
+        <span class="rail-icon">⚙</span><span class="rail-label">Partitura</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-staves" title="Pentagramas">
+        <span class="rail-icon">≣</span><span class="rail-label">Pentagramas</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-notes" title="Editor de notas">
+        <span class="rail-icon">♪</span><span class="rail-label">Notas</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-chat" title="Asistente de composición">
+        <span class="rail-icon">✉</span><span class="rail-label">IA</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-source" title="Código ABC">
+        <span class="rail-icon">✎</span><span class="rail-label">ABC</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-look" title="Aspecto">
+        <span class="rail-icon">◐</span><span class="rail-label">Aspecto</span>
+      </button>
+    </nav>
+
+    <main class="stage drop-target" id="stage">
+      <div class="sheet drop-target" id="sheet">
+        <div id="score-container" class="drop-target"></div>
+      </div>
+      <p class="stage-hint" id="stage-hint">
+        Crea una partitura desde el panel <strong>Crear</strong> para empezar.
+      </p>
+    </main>
+  </div>
+
+  <!-- ===================== TRANSPORT BAR ===================== -->
+  <footer class="transport">
+    <div id="audio-controls"></div>
+    <button type="button" id="metronome-toggle" class="metronome-btn" title="Metrónomo: marca el pulso al reproducir">
+      <span class="metronome-icon">𝅘𝅥</span><span>Metrónomo</span>
+    </button>
+    <p id="playback-status" class="status"></p>
+  </footer>
+
+  <!-- ===================== FLOATING PANELS ===================== -->
+
+  <section class="floating-panel" id="panel-compose" hidden>
+    <header class="panel-header">
+      <span class="panel-title">✦ Nueva composición</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <p class="panel-hint">Describe la pieza y la IA la genera, o empieza con una hoja en blanco.</p>
+      <label for="prompt">Descripción de la pieza</label>
+      <textarea id="prompt" rows="3" placeholder="Ej: una melodía alegre de vals para piano, en tono mayor, inspirada en el otoño"></textarea>
+      <div class="options-grid">
+        <div>
+          <label for="instrument">Instrumento</label>
+          <select id="instrument">
+            <option value="">Automático</option>
+            <option value="piano">Piano</option>
+            <option value="violin">Violín</option>
+            <option value="flute">Flauta</option>
+            <option value="guitar">Guitarra</option>
+            <option value="voice">Voz</option>
+          </select>
+        </div>
+        <div>
+          <label for="gen-key">Tonalidad</label>
+          <input id="gen-key" type="text" placeholder="Ej: C, Am, G..." />
+        </div>
+        <div>
+          <label for="gen-time">Compás</label>
+          <input id="gen-time" type="text" placeholder="Ej: 4/4, 3/4..." />
+        </div>
+        <div>
+          <label for="gen-tempo">Tempo (BPM)</label>
+          <input id="gen-tempo" type="number" min="20" max="300" placeholder="Ej: 120" />
+        </div>
+      </div>
+      <div class="btn-pair">
+        <button type="button" id="compose-btn">Componer con IA</button>
+        <button type="button" id="blank-btn" class="secondary-btn">Empezar sin IA</button>
+      </div>
+      <p id="status" class="status"></p>
+    </div>
+  </section>
+
+  <section class="floating-panel" id="panel-score" hidden>
+    <header class="panel-header">
+      <span class="panel-title">⚙ Opciones de partitura</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <p class="panel-hint">Cambia los valores, o arrastra uno sobre la partitura para aplicarlo.</p>
+      <div class="options-grid">
+        <div>
+          <label for="prop-key">Tonalidad</label>
+          <select id="prop-key"></select>
+        </div>
+        <div>
+          <label for="prop-time">Compás</label>
+          <select id="prop-time"></select>
+        </div>
+      </div>
+      <label for="prop-tempo">Tempo (BPM)</label>
+      <input id="prop-tempo" type="number" min="20" max="300" />
+
+      <label class="chip-row-label">Tonalidades rápidas</label>
+      <div class="chip-row" id="key-chips"></div>
+      <label class="chip-row-label">Compases rápidos</label>
+      <div class="chip-row" id="time-chips"></div>
+      <label class="chip-row-label">Tempos rápidos</label>
+      <div class="chip-row" id="tempo-chips"></div>
+    </div>
+  </section>
+
+  <section class="floating-panel" id="panel-staves" hidden>
+    <header class="panel-header">
+      <span class="panel-title">≣ Pentagramas</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <p class="panel-hint">Arrastra ⠿ para reordenar. Clic derecho para más opciones.</p>
+      <div id="voice-list" class="voice-list"></div>
+      <button type="button" id="add-voice-btn" class="secondary-btn">+ Añadir pentagrama</button>
+    </div>
+  </section>
+
+  <section class="floating-panel panel-wide" id="panel-notes" hidden>
+    <header class="panel-header">
+      <span class="panel-title">♪ Editor de notas</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <p class="panel-hint">Arrastra una duración sobre el pentagrama: la altura la decide dónde la sueltes.</p>
+      <div class="note-toolbar">
+        <div class="toolbar-group">
+          <label>Con sonido</label>
+          <div class="btn-row" id="note-palette">
+            <button type="button" class="palette-chip" data-kind="note" data-duration="8" title="Redonda">𝅝</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="4" title="Blanca">𝅗𝅥</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="2" title="Negra">♩</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="" title="Corchea">♪</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="/2" title="Semicorchea">♬</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="/4" title="Fusa">𝅘𝅥𝅰</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <label>Silencio</label>
+          <div class="btn-row" id="rest-palette">
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="8" title="Silencio de redonda">𝄻</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="4" title="Silencio de blanca">𝄼</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="2" title="Silencio de negra">𝄽</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="" title="Silencio de corchea">𝄾</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="/2" title="Silencio de semicorchea">𝄿</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="/4" title="Silencio de fusa">𝅀</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <label for="accidental-select">Alteración</label>
+          <select id="accidental-select">
+            <option value="">Ninguna</option>
+            <option value="^">Sostenido ♯</option>
+            <option value="_">Bemol ♭</option>
+            <option value="=">Becuadro ♮</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label for="tuplet-select">Grupo especial</label>
+          <select id="tuplet-select">
+            <option value="0">Normal</option>
+            <option value="2">Doscillo (2)</option>
+            <option value="3">Tresillo (3)</option>
+            <option value="5">Cincillo (5)</option>
+            <option value="6">Seisillo (6)</option>
+            <option value="7">Septillo (7)</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label>Otros</label>
+          <div class="btn-row">
+            <button type="button" id="barline-btn">Barra |</button>
+            <button type="button" id="repeat-start-btn">|:</button>
+            <button type="button" id="repeat-end-btn">:|</button>
+          </div>
+        </div>
+      </div>
+      <p class="tuplet-hint" id="tuplet-hint"></p>
+    </div>
+  </section>
+
+  <section class="floating-panel" id="panel-source" hidden>
+    <header class="panel-header">
+      <span class="panel-title">✎ Código ABC</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <textarea id="abc-source" rows="14" spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <section class="floating-panel" id="panel-look" hidden>
+    <header class="panel-header">
+      <span class="panel-title">◐ Aspecto</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <label>Ambiente</label>
+      <div class="segmented segmented-block" id="theme-switch">
+        <button type="button" data-theme="dark">☾ Oscuro</button>
+        <button type="button" data-theme="light">☀ Claro</button>
+      </div>
+
+      <label for="font-select">Tipografía de la interfaz</label>
+      <select id="font-select">
+        <option value="inter">Inter — moderna</option>
+        <option value="poppins">Poppins — geométrica (como el logo)</option>
+        <option value="serif">Source Serif — clásica</option>
+        <option value="system">Del sistema</option>
+      </select>
+
+      <label for="notation-select">Nombre de las notas</label>
+      <select id="notation-select">
+        <option value="latina">Latina — Do, Re, Mi, Fa, Sol, La, Si</option>
+        <option value="inglesa">Inglesa — C, D, E, F, G, A, B</option>
+      </select>
+
+      <label for="score-font-select">Tipografía de la partitura</label>
+      <select id="score-font-select">
+        <option value="engraving">Clásica de grabado (recomendada)</option>
+        <option value="ui">La misma que la interfaz</option>
+      </select>
+      <p class="panel-hint" style="margin-top: 12px">
+        Afecta al título, autor y nombres de pentagrama. Las notas siempre usan la fuente musical.
+      </p>
+    </div>
+  </section>
+
+  <section class="floating-panel panel-tall" id="panel-chat" hidden>
+    <header class="panel-header">
+      <span class="panel-title">✉ Asistente de composición</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body chat-body">
+      <div id="chat-messages" class="chat-messages"></div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" rows="2" placeholder="Ej: añade una segunda voz de bajo..."></textarea>
+        <button type="button" id="chat-send-btn">Enviar</button>
+      </div>
+      <p id="chat-status" class="status"></p>
+    </div>
+  </section>
+
+  <div id="drag-ghost" class="drag-ghost" hidden></div>
+  <div id="context-menu" class="context-menu" hidden></div>
+  <div id="note-preview" class="note-preview" hidden></div>
+  <div id="note-preview-label" class="note-preview-label" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/abcjs@6.7.0/dist/abcjs-basic-min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,8 +1,9 @@
 import logging
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import require_auth
 from .config import settings
 from .deepseek_client import (
     DeepSeekError,
@@ -51,7 +52,7 @@ async def health():
 
 
 @app.post("/api/compose", response_model=ComposeResponse)
-async def compose(req: ComposeRequest):
+async def compose(req: ComposeRequest, claims: dict = Depends(require_auth)):
     try:
         abc_text = await generate_abc(req.prompt, req.key, req.tempo, req.time_signature, req.instrument)
     except DeepSeekError as exc:
@@ -98,7 +99,7 @@ async def compose(req: ComposeRequest):
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, claims: dict = Depends(require_auth)):
     history = [h.model_dump() for h in req.history]
     messages = build_chat_messages(req.abc, req.message, history)
 
@@ -150,7 +151,7 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/api/render", response_model=RenderResponse)
-async def render(req: RenderRequest):
+async def render(req: RenderRequest, claims: dict = Depends(require_auth)):
     try:
         score = parse_abc(req.abc)
     except InvalidAbcError as exc:

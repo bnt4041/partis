@@ -20,3 +20,9 @@ class UsernameTaken(DomainError):
 
 class InvalidCredentials(DomainError):
     pass
+
+
+class NotAuthorized(DomainError):
+    """The caller is authenticated but doesn't hold a role allowed to do this."""
+
+    pass

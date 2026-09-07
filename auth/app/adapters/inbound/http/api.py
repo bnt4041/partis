@@ -6,26 +6,59 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.adapters.inbound.http import dependencies as deps
 from app.adapters.inbound.http.schemas import (
     AuthResponse,
+    CreateOrganizationRequest,
+    CreateOrgUserRequest,
     LoginRequest,
-    RegisterTenantRequest,
-    RegisterUserRequest,
+    OrganizationResponse,
+    OrganizationSummary,
+    OrgUserResponse,
+    OrgUserSummary,
     UserResponse,
 )
-from app.application.use_cases import AuthResult, LoginInput, RegisterTenantInput, RegisterUserInput
-from app.domain.entities import User
-from app.domain.exceptions import InvalidCredentials, TenantNotFound, TenantSlugTaken, UsernameTaken
+from app.application.use_cases import (
+    AuthResult,
+    CreateOrganizationInput,
+    CreateOrgUserInput,
+    LoginInput,
+    OrganizationResult,
+    OrgUserResult,
+)
+from app.domain.entities import Role, User
+from app.domain.exceptions import InvalidCredentials, NotAuthorized, TenantNotFound, UsernameTaken
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    use_case=Depends(deps.get_current_user_use_case),
+) -> User:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Falta el token de acceso.")
+    try:
+        return use_case.execute(credentials.credentials)
+    except InvalidCredentials:
+        raise HTTPException(status_code=401, detail="Token inválido o caducado.")
 
 
 def _auth_response(result: AuthResult) -> AuthResponse:
     return AuthResponse(
         access_token=result.token,
         user_id=str(result.user_id),
-        tenant_id=str(result.tenant_id),
+        tenant_id=str(result.tenant_id) if result.tenant_id else None,
         role=result.role,
     )
+
+
+def _org_response(result: OrganizationResult) -> OrganizationResponse:
+    return OrganizationResponse(
+        tenant_id=str(result.tenant_id), slug=result.slug, name=result.name, director_username=result.director_username
+    )
+
+
+def _org_user_response(result: OrgUserResult) -> OrgUserResponse:
+    return OrgUserResponse(user_id=str(result.user_id), username=result.username, role=result.role)
 
 
 @router.get("/health")
@@ -33,50 +66,11 @@ def health():
     return {"status": "ok"}
 
 
-@router.post("/tenants", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register_tenant(body: RegisterTenantRequest, use_case=Depends(deps.get_register_tenant)):
-    """Sign-up: creates a new tenant (workspace) and its owner user."""
-    try:
-        result = use_case.execute(
-            RegisterTenantInput(
-                tenant_slug=body.tenant_slug,
-                tenant_name=body.tenant_name,
-                owner_username=body.username,
-                owner_password=body.password,
-                owner_email=body.email,
-            )
-        )
-    except TenantSlugTaken:
-        raise HTTPException(status_code=409, detail="Ese identificador de organización ya está en uso.")
-    except UsernameTaken:
-        raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está en uso.")
-    return _auth_response(result)
-
-
-@router.post("/users", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register_user(body: RegisterUserRequest, use_case=Depends(deps.get_register_user)):
-    """Add a member to an existing tenant."""
-    try:
-        result = use_case.execute(
-            RegisterUserInput(
-                tenant_slug=body.tenant_slug,
-                username=body.username,
-                password=body.password,
-                email=body.email,
-            )
-        )
-    except TenantNotFound:
-        raise HTTPException(status_code=404, detail="Organización no encontrada.")
-    except UsernameTaken:
-        raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está en uso.")
-    return _auth_response(result)
-
-
 @router.post("/login", response_model=AuthResponse)
 def login(body: LoginRequest, use_case=Depends(deps.get_login)):
     try:
         result = use_case.execute(
-            LoginInput(tenant_slug=body.tenant_slug, username=body.username, password=body.password)
+            LoginInput(username=body.username, password=body.password, tenant_slug=body.tenant_slug or None)
         )
     except InvalidCredentials:
         raise HTTPException(status_code=401, detail="Credenciales inválidas.")
@@ -84,20 +78,93 @@ def login(body: LoginRequest, use_case=Depends(deps.get_login)):
 
 
 @router.get("/me", response_model=UserResponse)
-def me(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-    use_case=Depends(deps.get_current_user_use_case),
-):
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Falta el token de acceso.")
-    try:
-        user: User = use_case.execute(credentials.credentials)
-    except InvalidCredentials:
-        raise HTTPException(status_code=401, detail="Token inválido o caducado.")
+def me(user: User = Depends(current_user)):
     return UserResponse(
         id=str(user.id),
-        tenant_id=str(user.tenant_id),
+        tenant_id=str(user.tenant_id) if user.tenant_id else None,
         username=user.username,
         email=user.email,
         role=user.role.value,
     )
+
+
+# ---------------------------------------------------------------------------
+# App-admin: create/list organizations. There is no public sign-up - a tenant
+# only comes into being through this, called by someone with role app_admin.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/organizations", response_model=OrganizationResponse, status_code=status.HTTP_201_CREATED)
+def create_organization(
+    body: CreateOrganizationRequest,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_create_organization),
+):
+    try:
+        result = use_case.execute(
+            user,
+            CreateOrganizationInput(
+                name=body.name,
+                director_username=body.director_username,
+                director_password=body.director_password,
+                director_email=body.director_email,
+            ),
+        )
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede crear organizaciones.")
+    return _org_response(result)
+
+
+@router.get("/admin/organizations", response_model=list[OrganizationSummary])
+def list_organizations(user: User = Depends(current_user), use_case=Depends(deps.get_list_organizations)):
+    try:
+        tenants = use_case.execute(user)
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede ver las organizaciones.")
+    return [
+        OrganizationSummary(tenant_id=str(t.id), slug=t.slug, name=t.name, created_at=t.created_at.isoformat())
+        for t in tenants
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Org director/admin: create/list the users of their own tenant.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/org/users", response_model=OrgUserResponse, status_code=status.HTTP_201_CREATED)
+def create_org_user(
+    body: CreateOrgUserRequest,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_create_org_user),
+):
+    try:
+        result = use_case.execute(
+            user,
+            CreateOrgUserInput(username=body.username, password=body.password, role=Role(body.role), email=body.email),
+        )
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="No tienes permiso para crear ese tipo de usuario.")
+    except UsernameTaken:
+        raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está en uso en tu organización.")
+    return _org_user_response(result)
+
+
+@router.get("/org/users", response_model=list[OrgUserSummary])
+def list_org_users(user: User = Depends(current_user), use_case=Depends(deps.get_list_org_users)):
+    try:
+        users = use_case.execute(user)
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo el director o un administrador de la organización pueden ver esta lista.")
+    return [
+        OrgUserSummary(user_id=str(u.id), username=u.username, email=u.email, role=u.role.value) for u in users
+    ]
+
+
+@router.get("/org/me", response_model=OrganizationSummary)
+def get_own_organization(user: User = Depends(current_user), use_case=Depends(deps.get_own_organization)):
+    try:
+        tenant = use_case.execute(user)
+    except TenantNotFound:
+        raise HTTPException(status_code=404, detail="Tu usuario no pertenece a ninguna organización.")
+    return OrganizationSummary(tenant_id=str(tenant.id), slug=tenant.slug, name=tenant.name, created_at=tenant.created_at.isoformat())

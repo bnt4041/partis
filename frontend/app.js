@@ -91,6 +91,7 @@ const PANEL_DEFAULT_POS = {
   "panel-notes": { x: 170, y: 156 },
   "panel-source": { x: 196, y: 182 },
   "panel-look": { x: 222, y: 208 },
+  "panel-org": { x: 248, y: 234 },
   "panel-chat": { x: null, y: 78 }, // x null = anchored to the right edge
 };
 
@@ -2030,7 +2031,7 @@ async function compose() {
   setStatus("Componiendo con IA... esto puede tardar unos segundos.");
 
   try {
-    const res = await fetch("/api/compose", {
+    const res = await authFetch("/api/compose", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -2087,7 +2088,7 @@ blankBtn.addEventListener("click", startBlank);
 // ===================== Downloads (server-side export on demand) =====================
 
 async function renderCurrentAbc() {
-  const res = await fetch("/api/render", {
+  const res = await authFetch("/api/render", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ abc: currentAbc }),
@@ -2144,7 +2145,7 @@ async function sendChatMessage() {
   setChatStatus("Pensando...");
 
   try {
-    const res = await fetch("/api/chat", {
+    const res = await authFetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ abc: currentAbc, message: text, history: chatHistory.slice(-20) }),
@@ -2177,6 +2178,280 @@ chatInput.addEventListener("keydown", (e) => {
   }
 });
 
+// ===================== Auth (login gate + role-based UI) =================
+//
+// There is no public sign-up: an app_admin creates organizations from the
+// admin console, and a director/admin creates the users of their own
+// organization from the "Organización" panel. The composer itself
+// (compose/chat/render) requires a valid session - the backend checks the
+// same JWT the auth service issues.
+
+const AUTH_STORAGE_KEY = "partis.auth";
+const ROLE_LABELS = { app_admin: "administrador de la app", director: "director", admin: "admin. de organización", musico: "músico" };
+
+const authGateEl = document.getElementById("auth-gate");
+const authIndicatorEl = document.getElementById("auth-indicator");
+const authUserLabelEl = document.getElementById("auth-user-label");
+const logoutBtn = document.getElementById("logout-btn");
+const loginForm = document.getElementById("auth-login-form");
+const loginStatusEl = document.getElementById("login-status");
+
+const adminConsoleEl = document.getElementById("admin-console");
+const railOrgBtn = document.getElementById("rail-org-btn");
+
+let authState = null; // { token, tenantId, userId, username, role }
+
+function loadAuthState() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthState(state) {
+  authState = state;
+  try {
+    if (state) localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(state));
+    else localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {
+    /* storage unavailable (private mode...): session just won't survive a reload */
+  }
+}
+
+function setAuthFormStatus(el, message, isError = false) {
+  el.textContent = message;
+  el.classList.toggle("error", isError);
+}
+
+function setComposerVisible(visible) {
+  document.querySelector(".topbar").hidden = !visible;
+  document.querySelector(".workspace").hidden = !visible;
+  document.querySelector(".transport").hidden = !visible;
+}
+
+function showAuthGate() {
+  authGateEl.hidden = false;
+  authIndicatorEl.hidden = true;
+  adminConsoleEl.hidden = true;
+  setComposerVisible(false);
+}
+
+// Shows the right shell for the signed-in user's role: the app-admin console
+// (organizations only, no music), or the composer (with an extra
+// "Organización" panel for a director/admin to manage their own users).
+function applyRoleUI() {
+  authGateEl.hidden = true;
+  authIndicatorEl.hidden = false;
+  authUserLabelEl.textContent = authState ? `${authState.username} (${ROLE_LABELS[authState.role] || authState.role})` : "";
+
+  const isAppAdmin = authState && authState.role === "app_admin";
+  const isOrgManager = authState && (authState.role === "director" || authState.role === "admin");
+
+  adminConsoleEl.hidden = !isAppAdmin;
+  setComposerVisible(!isAppAdmin);
+  railOrgBtn.hidden = !isOrgManager;
+  // A panel left open from a previous session (director/admin) must not
+  // leak into a different account signing in on the same browser.
+  if (!isOrgManager) closePanel("panel-org");
+
+  if (isAppAdmin) {
+    document.getElementById("admin-user-label").textContent = authState.username;
+    loadOrganizations();
+  } else if (isOrgManager) {
+    const adminOption = document.querySelector('#new-user-role option[value="admin"]');
+    if (adminOption) adminOption.hidden = authState.role !== "director";
+    loadOwnOrganization();
+    loadOrgUsers();
+  }
+}
+
+function signOut() {
+  saveAuthState(null);
+  showAuthGate();
+}
+
+logoutBtn.addEventListener("click", signOut);
+document.getElementById("admin-logout-btn").addEventListener("click", signOut);
+
+// Attaches the bearer token to a fetch call, and signs the user out if the
+// backend rejects it - the backend and the auth service share one JWT
+// secret, so a 401 here always means "log in again".
+async function authFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (authState && authState.token) headers.Authorization = `Bearer ${authState.token}`;
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401 && authState) {
+    signOut();
+    setStatus("Tu sesión ha caducado. Inicia sesión de nuevo.", true);
+  }
+  return res;
+}
+
+async function parseAuthResponse(res) {
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "Error desconocido");
+  return data;
+}
+
+loginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const tenantSlug = document.getElementById("login-tenant").value.trim();
+  const username = document.getElementById("login-username").value.trim();
+  const password = document.getElementById("login-password").value;
+  setAuthFormStatus(loginStatusEl, "Entrando...");
+  try {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenant_slug: tenantSlug || null, username, password }),
+    });
+    const data = await parseAuthResponse(res);
+    saveAuthState({ token: data.access_token, tenantId: data.tenant_id, userId: data.user_id, username, role: data.role });
+    loginForm.reset();
+    setAuthFormStatus(loginStatusEl, "");
+    applyRoleUI();
+  } catch (err) {
+    setAuthFormStatus(loginStatusEl, err.message, true);
+  }
+});
+
+// Checks any stored session against the auth service before trusting it -
+// tokens expire, and the JWT secret can change (e.g. a fresh install).
+async function initAuth() {
+  const stored = loadAuthState();
+  if (!stored || !stored.token) {
+    showAuthGate();
+    return;
+  }
+  authState = stored;
+  try {
+    const res = await fetch("/api/auth/me", { headers: { Authorization: `Bearer ${stored.token}` } });
+    if (!res.ok) throw new Error("invalid session");
+    applyRoleUI();
+  } catch {
+    saveAuthState(null);
+    showAuthGate();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// App-admin console: create/list organizations.
+// ---------------------------------------------------------------------------
+
+function buildOrgRow(primaryText, secondaryText, roleText) {
+  const row = document.createElement("div");
+  row.className = "org-row";
+  const left = document.createElement("span");
+  left.className = "org-row-name";
+  left.textContent = primaryText;
+  row.appendChild(left);
+  if (roleText) {
+    const role = document.createElement("span");
+    role.className = "org-row-role";
+    role.textContent = roleText;
+    row.appendChild(role);
+  }
+  const right = document.createElement("span");
+  right.className = "org-row-meta";
+  right.textContent = secondaryText;
+  row.appendChild(right);
+  return row;
+}
+
+async function loadOrganizations() {
+  const listEl = document.getElementById("org-list");
+  listEl.textContent = "Cargando...";
+  try {
+    const orgs = await parseAuthResponse(await authFetch("/api/auth/admin/organizations"));
+    listEl.innerHTML = "";
+    if (orgs.length === 0) {
+      listEl.textContent = "Todavía no hay organizaciones.";
+      return;
+    }
+    orgs.forEach((org) => listEl.appendChild(buildOrgRow(org.name, org.slug)));
+  } catch (err) {
+    listEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+document.getElementById("create-org-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = document.getElementById("org-name").value.trim();
+  const directorUsername = document.getElementById("org-director-username").value.trim();
+  const directorPassword = document.getElementById("org-director-password").value;
+  const statusEl = document.getElementById("create-org-status");
+  setAuthFormStatus(statusEl, "Creando...");
+  try {
+    const data = await parseAuthResponse(
+      await authFetch("/api/auth/admin/organizations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, director_username: directorUsername, director_password: directorPassword }),
+      })
+    );
+    setAuthFormStatus(statusEl, `Creada. Identificador para iniciar sesión: "${data.slug}".`);
+    document.getElementById("create-org-form").reset();
+    loadOrganizations();
+  } catch (err) {
+    setAuthFormStatus(statusEl, err.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// "Organización" panel (director/admin): own org info + manage its users.
+// ---------------------------------------------------------------------------
+
+async function loadOwnOrganization() {
+  const labelEl = document.getElementById("org-slug-label");
+  try {
+    const data = await parseAuthResponse(await authFetch("/api/auth/org/me"));
+    labelEl.textContent = data.slug;
+  } catch {
+    labelEl.textContent = "—";
+  }
+}
+
+async function loadOrgUsers() {
+  const listEl = document.getElementById("org-user-list");
+  listEl.textContent = "Cargando...";
+  try {
+    const users = await parseAuthResponse(await authFetch("/api/auth/org/users"));
+    listEl.innerHTML = "";
+    if (users.length === 0) {
+      listEl.textContent = "Sin usuarios.";
+      return;
+    }
+    users.forEach((u) => listEl.appendChild(buildOrgRow(u.username, "", ROLE_LABELS[u.role] || u.role)));
+  } catch (err) {
+    listEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+document.getElementById("create-org-user-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = document.getElementById("new-user-username").value.trim();
+  const password = document.getElementById("new-user-password").value;
+  const role = document.getElementById("new-user-role").value;
+  const statusEl = document.getElementById("create-org-user-status");
+  setAuthFormStatus(statusEl, "Creando...");
+  try {
+    await parseAuthResponse(
+      await authFetch("/api/auth/org/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, role }),
+      })
+    );
+    setAuthFormStatus(statusEl, "Usuario creado.");
+    document.getElementById("create-org-user-form").reset();
+    loadOrgUsers();
+  } catch (err) {
+    setAuthFormStatus(statusEl, err.message, true);
+  }
+});
+
 // ===================== Init =====================
 
 setupLookControls();
@@ -2190,3 +2465,4 @@ updateToolbarEnabled();
 updateScoreTitleFromAbc();
 refreshNoteNaming();
 stageEl.classList.add("is-empty");
+initAuth();

@@ -25,7 +25,7 @@ class JwtTokenIssuer(TokenIssuer):
         now = datetime.now(timezone.utc)
         payload = {
             "sub": str(user.id),
-            "tenant_id": str(user.tenant_id),
+            "tenant_id": str(user.tenant_id) if user.tenant_id else None,
             "username": user.username,
             "role": user.role.value,
             "iat": now,
@@ -38,9 +38,10 @@ class JwtTokenIssuer(TokenIssuer):
             payload = jwt.decode(token, self._secret, algorithms=[self._algorithm])
         except jwt.PyJWTError as exc:
             raise InvalidCredentials() from exc
+        tenant_id = payload.get("tenant_id")
         return TokenClaims(
             user_id=UUID(payload["sub"]),
-            tenant_id=UUID(payload["tenant_id"]),
+            tenant_id=UUID(tenant_id) if tenant_id else None,
             username=payload["username"],
             role=payload["role"],
         )

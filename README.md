@@ -32,23 +32,43 @@ Composición musical asistida por IA (DeepSeek), con renderizado de partitura en
 
 ## Autenticación (`auth/`)
 
-El frontend todavía no tiene pantallas de login - el servicio existe y funciona, pero conectarlo a la interfaz es un paso pendiente. Se puede probar directamente:
+**No hay alta pública.** Los roles son:
+
+- **`app_admin`** — administra la plataforma, no pertenece a ninguna organización. Es el único que puede crear organizaciones (desde una consola de administración propia, no el editor de partituras). Se crea automáticamente al primer arranque a partir de `ADMIN_BOOTSTRAP_USERNAME`/`ADMIN_BOOTSTRAP_PASSWORD` (`.env`) - inicia sesión dejando el campo "Organización" vacío.
+- **`director`** — se crea junto con la organización (uno por organización). Puede crear `admin` o `musico` dentro de su organización.
+- **`admin`** — administrador de una organización, creado por su `director`. Puede crear `musico`.
+- **`musico`** — usuario normal, usa el editor de partituras.
+
+El identificador de organización (`slug`) para iniciar sesión se genera automáticamente a partir de su nombre - no lo elige nadie a mano.
+
+Flujo: `app_admin` inicia sesión (sin organización) → panel de administración → crea una organización (nombre + usuario/contraseña del director) → el `director` inicia sesión con ese identificador → panel "Organización" del editor → crea los `admin`/`musico` que necesite.
+
+El token se guarda en `localStorage` y se envía en cada llamada a `/api/compose`, `/api/chat`, `/api/render` y a las rutas de `/api/auth/...`; el `backend` valida ese JWT (comparte `JWT_SECRET` con `auth` vía `.env`) y responde 401 si falta o ha caducado.
+
+También se puede usar directamente por API:
 
 ```bash
-# Alta de una organización (tenant) nueva + su usuario propietario
-curl -X POST http://localhost:3000/api/auth/tenants \
+# Login del app_admin (sin organización)
+curl -X POST http://localhost:3000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"tenant_slug":"mi-coro","tenant_name":"Mi Coro","username":"ana","password":"unaClaveSegura123"}'
+  -d '{"username":"admin","password":"<ADMIN_BOOTSTRAP_PASSWORD>"}'
 
-# Login (devuelve un access_token JWT)
+# Crear una organización (requiere token de app_admin) - el slug se genera solo
+curl -X POST http://localhost:3000/api/auth/admin/organizations \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <token>" \
+  -d '{"name":"Mi Coro","director_username":"ana","director_password":"unaClaveSegura123"}'
+
+# Login del director/admin/musico (con organización)
 curl -X POST http://localhost:3000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"tenant_slug":"mi-coro","username":"ana","password":"unaClaveSegura123"}'
 
-# Usuario autenticado actual
-curl http://localhost:3000/api/auth/me -H "Authorization: Bearer <access_token>"
+# El director/admin crea un usuario en su propia organización
+curl -X POST http://localhost:3000/api/auth/org/users \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <token-de-ana>" \
+  -d '{"username":"pedro","password":"otraClaveSegura123","role":"musico"}'
 ```
 
-Cada usuario pertenece a un `tenant_id`; el nombre de usuario solo tiene que ser único **dentro** de su organización, no globalmente. No hay envío de email todavía (ni verificación de cuenta ni recuperación de contraseña) - de momento el alta es directa con usuario/contraseña.
+Cada usuario pertenece a un `tenant_id` (`NULL` para un `app_admin`); el nombre de usuario solo tiene que ser único **dentro** de su organización (o entre los `app_admin`, que no tienen organización), no globalmente. No hay envío de email todavía (ni verificación de cuenta ni recuperación de contraseña).
 
-Por dentro sigue arquitectura hexagonal: `domain/` (entidades y *ports* - interfaces), `application/` (casos de uso, solo dependen de los *ports*), `adapters/` (implementaciones concretas: Postgres, bcrypt, JWT, y las rutas FastAPI). El día que se integre Keycloak, solo hace falta añadir un adaptador nuevo (p. ej. `KeycloakTokenIssuer`) y cambiar el cableado en `adapters/inbound/http/dependencies.py` - el dominio, los casos de uso y las rutas no cambian.
+Por dentro sigue arquitectura hexagonal: `domain/` (entidades y *ports* - interfaces), `application/` (casos de uso, solo dependen de los *ports*, incluida toda la lógica de "qué rol puede crear qué rol"), `adapters/` (implementaciones concretas: Postgres, bcrypt, JWT, y las rutas FastAPI). El día que se integre Keycloak, solo hace falta añadir un adaptador nuevo (p. ej. `KeycloakTokenIssuer`) y cambiar el cableado en `adapters/inbound/http/dependencies.py` - el dominio, los casos de uso y las rutas no cambian.

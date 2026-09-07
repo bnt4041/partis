@@ -12,7 +12,7 @@ this file never need to change.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from app.domain.entities import Tenant, User
@@ -24,15 +24,27 @@ class TenantRepository(ABC):
     def get_by_slug(self, slug: str) -> Optional[Tenant]: ...
 
     @abstractmethod
+    def get_by_id(self, tenant_id: UUID) -> Optional[Tenant]: ...
+
+    @abstractmethod
+    def list_all(self) -> List[Tenant]: ...
+
+    @abstractmethod
     def save(self, tenant: Tenant) -> None: ...
 
 
 class UserRepository(ABC):
     @abstractmethod
-    def get_by_username(self, tenant_id: UUID, username: str) -> Optional[User]: ...
+    def get_by_username(self, tenant_id: Optional[UUID], username: str) -> Optional[User]: ...
 
     @abstractmethod
     def get_by_id(self, user_id: UUID) -> Optional[User]: ...
+
+    @abstractmethod
+    def list_by_tenant(self, tenant_id: UUID) -> List[User]: ...
+
+    @abstractmethod
+    def count_app_admins(self) -> int: ...
 
     @abstractmethod
     def save(self, user: User) -> None: ...

@@ -1,4 +1,5 @@
 from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -9,22 +10,26 @@ from app.adapters.inbound.http.schemas import (
     CreateOrganizationRequest,
     CreateOrgUserRequest,
     LoginRequest,
+    OrgChoiceResponse,
     OrganizationResponse,
     OrganizationSummary,
     OrgUserResponse,
     OrgUserSummary,
+    UpdateOrganizationRequest,
     UserResponse,
 )
 from app.application.use_cases import (
+    PLATFORM_SENTINEL,
     AuthResult,
     CreateOrganizationInput,
     CreateOrgUserInput,
     LoginInput,
     OrganizationResult,
     OrgUserResult,
+    UpdateOrganizationInput,
 )
-from app.domain.entities import Role, User
-from app.domain.exceptions import InvalidCredentials, NotAuthorized, TenantNotFound, UsernameTaken
+from app.domain.entities import Role, Tenant, User
+from app.domain.exceptions import AmbiguousLogin, InvalidCredentials, NotAuthorized, TenantNotFound, UsernameTaken
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -57,6 +62,10 @@ def _org_response(result: OrganizationResult) -> OrganizationResponse:
     )
 
 
+def _org_summary(tenant: Tenant) -> OrganizationSummary:
+    return OrganizationSummary(tenant_id=str(tenant.id), slug=tenant.slug, name=tenant.name, created_at=tenant.created_at.isoformat())
+
+
 def _org_user_response(result: OrgUserResult) -> OrgUserResponse:
     return OrgUserResponse(user_id=str(result.user_id), username=result.username, role=result.role)
 
@@ -71,6 +80,13 @@ def login(body: LoginRequest, use_case=Depends(deps.get_login)):
     try:
         result = use_case.execute(
             LoginInput(username=body.username, password=body.password, tenant_slug=body.tenant_slug or None)
+        )
+    except AmbiguousLogin as exc:
+        return AuthResponse(
+            requires_organization=True,
+            organizations=[
+                OrgChoiceResponse(tenant_slug=c.tenant_slug or PLATFORM_SENTINEL, name=c.name) for c in exc.choices
+            ],
         )
     except InvalidCredentials:
         raise HTTPException(status_code=401, detail="Credenciales inválidas.")
@@ -121,10 +137,25 @@ def list_organizations(user: User = Depends(current_user), use_case=Depends(deps
         tenants = use_case.execute(user)
     except NotAuthorized:
         raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede ver las organizaciones.")
-    return [
-        OrganizationSummary(tenant_id=str(t.id), slug=t.slug, name=t.name, created_at=t.created_at.isoformat())
-        for t in tenants
-    ]
+    return [_org_summary(t) for t in tenants]
+
+
+@router.patch("/admin/organizations/{tenant_id}", response_model=OrganizationSummary)
+def update_organization(
+    tenant_id: str,
+    body: UpdateOrganizationRequest,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_update_organization),
+):
+    try:
+        tenant = use_case.execute(user, UpdateOrganizationInput(tenant_id=UUID(tenant_id), name=body.name))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Identificador de organización inválido.")
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede editar organizaciones.")
+    except TenantNotFound:
+        raise HTTPException(status_code=404, detail="Organización no encontrada.")
+    return _org_summary(tenant)
 
 
 # ---------------------------------------------------------------------------
@@ -167,4 +198,4 @@ def get_own_organization(user: User = Depends(current_user), use_case=Depends(de
         tenant = use_case.execute(user)
     except TenantNotFound:
         raise HTTPException(status_code=404, detail="Tu usuario no pertenece a ninguna organización.")
-    return OrganizationSummary(tenant_id=str(tenant.id), slug=tenant.slug, name=tenant.name, created_at=tenant.created_at.isoformat())
+    return _org_summary(tenant)

@@ -16,3 +16,12 @@ class TokenClaims:
     tenant_id: Optional[UUID]
     username: str
     role: str
+
+
+@dataclass(frozen=True)
+class OrgChoice:
+    """One candidate account offered during login disambiguation. slug=None
+    means the platform-admin account, which has no organization."""
+
+    tenant_slug: Optional[str]
+    name: str

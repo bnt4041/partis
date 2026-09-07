@@ -30,6 +30,11 @@ class PostgresUserRepository(UserRepository):
                 ).fetchone()
         return self._to_entity(row) if row else None
 
+    def list_by_username(self, username: str) -> List[User]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(f"SELECT {_COLUMNS} FROM auth.users WHERE username = %s", (username,)).fetchall()
+        return [self._to_entity(row) for row in rows]
+
     def get_by_id(self, user_id: UUID) -> Optional[User]:
         with self._pool.connection() as conn:
             row = conn.execute(f"SELECT {_COLUMNS} FROM auth.users WHERE id = %s", (user_id,)).fetchone()

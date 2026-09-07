@@ -303,11 +303,11 @@
       <button type="button" class="panel-close" title="Cerrar">✕</button>
     </header>
     <div class="panel-body">
-      <p class="panel-hint">Identificador para iniciar sesión: <strong id="org-slug-label">—</strong></p>
+      <p class="panel-hint">Identificador de la organización: <strong id="org-slug-label">—</strong></p>
 
       <label for="new-user-username">Nuevo usuario</label>
       <form id="create-org-user-form" class="auth-form">
-        <input type="text" id="new-user-username" placeholder="Usuario" autocomplete="off" required />
+        <input type="text" id="new-user-username" placeholder="Usuario o email" autocomplete="off" required />
         <input type="password" id="new-user-password" placeholder="Contraseña" minlength="8" autocomplete="new-password" required />
         <select id="new-user-role">
           <option value="musico">Músico</option>
@@ -351,10 +351,7 @@
       </div>
 
       <form id="auth-login-form" class="auth-form">
-        <label>Organización <span class="label-hint">(vacío si eres administrador de la aplicación)</span>
-          <input type="text" id="login-tenant" placeholder="ej. coro-santa-cecilia" autocomplete="organization" />
-        </label>
-        <label>Usuario
+        <label>Usuario o email
           <input type="text" id="login-username" autocomplete="username" required />
         </label>
         <label>Contraseña
@@ -363,6 +360,14 @@
         <button type="submit" class="btn-primary">Entrar</button>
         <p class="status auth-status" id="login-status"></p>
       </form>
+
+      <!-- Shown instead of the form above only when the username/password
+           matches accounts in more than one organization. -->
+      <div id="auth-org-picker" class="auth-form" hidden>
+        <p class="panel-hint">Perteneces a varias organizaciones. ¿Con cuál quieres entrar?</p>
+        <div id="auth-org-choices" class="org-list"></div>
+        <button type="button" id="auth-org-picker-back" class="secondary-btn" style="margin-top: 10px">◂ Volver</button>
+      </div>
     </div>
   </div>
 
@@ -385,8 +390,8 @@
           <label>Nombre de la organización
             <input type="text" id="org-name" placeholder="Coro Santa Cecilia" required />
           </label>
-          <p class="panel-hint">El identificador para iniciar sesión se genera automáticamente a partir del nombre.</p>
-          <label>Usuario del director
+          <p class="panel-hint">El identificador de la organización se genera automáticamente a partir del nombre.</p>
+          <label>Usuario del director <span class="label-hint">(puede ser su email)</span>
             <input type="text" id="org-director-username" autocomplete="off" required />
           </label>
           <label>Contraseña del director

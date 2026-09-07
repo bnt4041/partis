@@ -22,6 +22,7 @@ from app.application.use_cases import (
     ListOrganizations,
     ListOrgUsers,
     Login,
+    UpdateOrganization,
 )
 from app.config import settings
 
@@ -77,3 +78,7 @@ def get_list_org_users() -> ListOrgUsers:
 
 def get_own_organization() -> GetOwnOrganization:
     return GetOwnOrganization(get_tenant_repository())
+
+
+def get_update_organization() -> UpdateOrganization:
+    return UpdateOrganization(get_tenant_repository())

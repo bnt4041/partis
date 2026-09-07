@@ -12,12 +12,19 @@ from typing import List, Optional
 
 from app.domain.entities import ADMIN_CAN_GRANT, DIRECTOR_CAN_GRANT, Role, Tenant, User
 from app.domain.exceptions import (
+    AmbiguousLogin,
     InvalidCredentials,
     NotAuthorized,
     TenantNotFound,
     UsernameTaken,
 )
 from app.domain.ports import PasswordHasher, TenantRepository, TokenIssuer, UserRepository
+from app.domain.value_objects import OrgChoice
+
+# A follow-up login call uses this in place of a real slug to mean "the
+# platform-admin account" - slugify() never produces underscores, so this can
+# never collide with an actual organization's slug.
+PLATFORM_SENTINEL = "__platform__"
 
 
 def slugify(name: str) -> str:
@@ -51,24 +58,45 @@ class AuthResult:
 class LoginInput:
     username: str
     password: str
-    tenant_slug: Optional[str] = None  # empty/None => platform (app_admin) login
+    # None => look everywhere the username could be (any organization, plus
+    # platform admins) and see which of those the password actually matches.
+    # A real slug or PLATFORM_SENTINEL => the caller already knows which
+    # account they want (typically the answer to an earlier AmbiguousLogin).
+    tenant_slug: Optional[str] = None
 
 
 class Login(_UseCase):
     def execute(self, data: LoginInput) -> AuthResult:
-        tenant_id = None
-        if data.tenant_slug:
-            tenant = self._tenants.get_by_slug(data.tenant_slug)
-            if tenant is None:
-                raise InvalidCredentials()
-            tenant_id = tenant.id
+        candidates = self._candidates(data.tenant_slug, data.username)
+        matching = [u for u in candidates if u and self._hasher.verify(data.password, u.password_hash)]
 
-        user = self._users.get_by_username(tenant_id, data.username)
-        if user is None or not self._hasher.verify(data.password, user.password_hash):
+        if not matching:
             raise InvalidCredentials()
+        if len(matching) > 1:
+            raise AmbiguousLogin(self._choices_for(matching))
+
+        user = matching[0]
         return AuthResult(
             token=self._tokens.issue(user), user_id=user.id, tenant_id=user.tenant_id, role=user.role.value
         )
+
+    def _candidates(self, tenant_slug: Optional[str], username: str) -> List[User]:
+        if tenant_slug == PLATFORM_SENTINEL:
+            return [self._users.get_by_username(None, username)]
+        if tenant_slug:
+            tenant = self._tenants.get_by_slug(tenant_slug)
+            return [self._users.get_by_username(tenant.id, username)] if tenant else []
+        return self._users.list_by_username(username)
+
+    def _choices_for(self, users: List[User]) -> List[OrgChoice]:
+        choices = []
+        for u in users:
+            if u.tenant_id is None:
+                choices.append(OrgChoice(tenant_slug=None, name="Administración de la plataforma"))
+                continue
+            tenant = self._tenants.get_by_id(u.tenant_id)
+            choices.append(OrgChoice(tenant_slug=tenant.slug if tenant else None, name=tenant.name if tenant else "?"))
+        return choices
 
 
 class GetCurrentUser:
@@ -145,6 +173,31 @@ class ListOrganizations:
         if actor.role != Role.APP_ADMIN:
             raise NotAuthorized()
         return self._tenants.list_all()
+
+
+@dataclass
+class UpdateOrganizationInput:
+    tenant_id: uuid.UUID
+    name: str
+
+
+class UpdateOrganization:
+    """Renames an organization. The slug is left alone - it's used to log
+    in, and changing it under a live tenant would be more disruptive than
+    useful for what's actually being asked (fixing a typo'd/outdated name)."""
+
+    def __init__(self, tenants: TenantRepository):
+        self._tenants = tenants
+
+    def execute(self, actor: User, data: UpdateOrganizationInput) -> Tenant:
+        if actor.role != Role.APP_ADMIN:
+            raise NotAuthorized()
+        tenant = self._tenants.get_by_id(data.tenant_id)
+        if tenant is None:
+            raise TenantNotFound(str(data.tenant_id))
+        updated = Tenant(id=tenant.id, slug=tenant.slug, name=data.name, created_at=tenant.created_at)
+        self._tenants.save(updated)
+        return updated
 
 
 # ---------------------------------------------------------------------------

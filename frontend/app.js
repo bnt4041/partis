@@ -2195,6 +2195,8 @@ const authUserLabelEl = document.getElementById("auth-user-label");
 const logoutBtn = document.getElementById("logout-btn");
 const loginForm = document.getElementById("auth-login-form");
 const loginStatusEl = document.getElementById("login-status");
+const orgPickerEl = document.getElementById("auth-org-picker");
+const orgChoicesEl = document.getElementById("auth-org-choices");
 
 const adminConsoleEl = document.getElementById("admin-console");
 const railOrgBtn = document.getElementById("rail-org-btn");
@@ -2236,6 +2238,7 @@ function showAuthGate() {
   authIndicatorEl.hidden = true;
   adminConsoleEl.hidden = true;
   setComposerVisible(false);
+  hideOrgPicker();
 }
 
 // Shows the right shell for the signed-in user's role: the app-admin console
@@ -2295,26 +2298,65 @@ async function parseAuthResponse(res) {
   return data;
 }
 
-loginForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const tenantSlug = document.getElementById("login-tenant").value.trim();
-  const username = document.getElementById("login-username").value.trim();
-  const password = document.getElementById("login-password").value;
+// Login is asked for no organization up front. If the username/password
+// matches accounts in more than one organization (the same person can
+// belong to several), the backend replies with a list instead of a token -
+// hideOrgPicker()/showOrgPicker() switch the form for that list, and the
+// chosen organization is what makes the follow-up call unambiguous.
+function hideOrgPicker() {
+  orgPickerEl.hidden = true;
+  loginForm.hidden = false;
+}
+
+function showOrgPicker(username, password, organizations) {
+  loginForm.hidden = true;
+  orgPickerEl.hidden = false;
+  orgChoicesEl.innerHTML = "";
+  organizations.forEach((org) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "org-row org-row-btn";
+    const label = document.createElement("span");
+    label.className = "org-row-name";
+    label.textContent = org.name;
+    btn.appendChild(label);
+    btn.addEventListener("click", () => attemptLogin(username, password, org.tenant_slug));
+    orgChoicesEl.appendChild(btn);
+  });
+}
+
+document.getElementById("auth-org-picker-back").addEventListener("click", hideOrgPicker);
+
+async function attemptLogin(username, password, tenantSlug) {
   setAuthFormStatus(loginStatusEl, "Entrando...");
   try {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenant_slug: tenantSlug || null, username, password }),
-    });
-    const data = await parseAuthResponse(res);
+    const data = await parseAuthResponse(
+      await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, tenant_slug: tenantSlug || null }),
+      })
+    );
+    if (data.requires_organization) {
+      setAuthFormStatus(loginStatusEl, "");
+      showOrgPicker(username, password, data.organizations);
+      return;
+    }
     saveAuthState({ token: data.access_token, tenantId: data.tenant_id, userId: data.user_id, username, role: data.role });
     loginForm.reset();
+    hideOrgPicker();
     setAuthFormStatus(loginStatusEl, "");
     applyRoleUI();
   } catch (err) {
     setAuthFormStatus(loginStatusEl, err.message, true);
   }
+}
+
+loginForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const username = document.getElementById("login-username").value.trim();
+  const password = document.getElementById("login-password").value;
+  attemptLogin(username, password, null);
 });
 
 // Checks any stored session against the auth service before trusting it -
@@ -2360,6 +2402,77 @@ function buildOrgRow(primaryText, secondaryText, roleText) {
   return row;
 }
 
+// An editable row: shows name + slug + a ✎ button that swaps the row for a
+// rename form (PATCH /admin/organizations/{id}), then swaps back.
+function buildEditableOrgRow(org) {
+  const row = document.createElement("div");
+
+  function renderView() {
+    row.className = "org-row";
+    row.innerHTML = "";
+    const left = document.createElement("span");
+    left.className = "org-row-name";
+    left.textContent = org.name;
+    row.appendChild(left);
+    const meta = document.createElement("span");
+    meta.className = "org-row-meta";
+    meta.textContent = org.slug;
+    row.appendChild(meta);
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "org-row-edit";
+    editBtn.textContent = "✎";
+    editBtn.title = "Editar nombre";
+    editBtn.addEventListener("click", renderEdit);
+    row.appendChild(editBtn);
+  }
+
+  function renderEdit() {
+    row.className = "org-row org-row-edit-form";
+    row.innerHTML = "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = org.name;
+    row.appendChild(input);
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "Guardar";
+    saveBtn.addEventListener("click", async () => {
+      const newName = input.value.trim();
+      if (!newName || newName === org.name) {
+        renderView();
+        return;
+      }
+      try {
+        const updated = await parseAuthResponse(
+          await authFetch(`/api/auth/admin/organizations/${org.tenant_id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: newName }),
+          })
+        );
+        org.name = updated.name;
+      } catch (err) {
+        setStatus(`Error al renombrar la organización: ${err.message}`, true);
+      }
+      renderView();
+    });
+    row.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "Cancelar";
+    cancelBtn.addEventListener("click", renderView);
+    row.appendChild(cancelBtn);
+
+    input.focus();
+  }
+
+  renderView();
+  return row;
+}
+
 async function loadOrganizations() {
   const listEl = document.getElementById("org-list");
   listEl.textContent = "Cargando...";
@@ -2370,7 +2483,7 @@ async function loadOrganizations() {
       listEl.textContent = "Todavía no hay organizaciones.";
       return;
     }
-    orgs.forEach((org) => listEl.appendChild(buildOrgRow(org.name, org.slug)));
+    orgs.forEach((org) => listEl.appendChild(buildEditableOrgRow(org)));
   } catch (err) {
     listEl.textContent = `Error: ${err.message}`;
   }

@@ -1441,3 +1441,48 @@ select:focus {
   color: var(--accent);
   font-weight: 600;
 }
+
+.org-row-btn {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.org-row-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.org-row-edit {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  flex: none;
+}
+
+.org-row-edit:hover {
+  color: var(--accent);
+}
+
+.org-row-edit-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.org-row-edit-form input {
+  flex: 1;
+}
+
+.org-row-edit-form button {
+  flex: none;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+}

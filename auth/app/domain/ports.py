@@ -38,6 +38,14 @@ class UserRepository(ABC):
     def get_by_username(self, tenant_id: Optional[UUID], username: str) -> Optional[User]: ...
 
     @abstractmethod
+    def list_by_username(self, username: str) -> List[User]:
+        """Every account (in any tenant, plus platform admins) using this
+        username - the same email can be a separate account in more than one
+        organization. Login uses this to find every candidate, then only
+        keeps the ones the given password actually matches."""
+        ...
+
+    @abstractmethod
     def get_by_id(self, user_id: UUID) -> Optional[User]: ...
 
     @abstractmethod

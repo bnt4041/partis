@@ -16,6 +16,7 @@ from app.domain.exceptions import (
     InvalidCredentials,
     NotAuthorized,
     TenantNotFound,
+    UserNotFound,
     UsernameTaken,
 )
 from app.domain.ports import PasswordHasher, TenantRepository, TokenIssuer, UserRepository
@@ -266,3 +267,102 @@ class GetOwnOrganization:
         if tenant is None:
             raise TenantNotFound(str(actor.tenant_id))
         return tenant
+
+
+# ---------------------------------------------------------------------------
+# App-admin: full CRUD over the users of any organization. A tenant's own
+# director/admin can already create users for themselves (above) - this is
+# the platform admin's broader version: any organization, any of its roles
+# (director/admin/musico, but never app_admin - platform accounts aren't
+# managed through a tenant-scoped endpoint), including edit and delete.
+# ---------------------------------------------------------------------------
+
+
+class AdminListOrgUsers:
+    def __init__(self, users: UserRepository):
+        self._users = users
+
+    def execute(self, actor: User, tenant_id: uuid.UUID) -> List[User]:
+        if actor.role != Role.APP_ADMIN:
+            raise NotAuthorized()
+        return self._users.list_by_tenant(tenant_id)
+
+
+@dataclass
+class AdminCreateOrgUserInput:
+    tenant_id: uuid.UUID
+    username: str
+    password: str
+    role: Role
+    email: Optional[str] = None
+
+
+class AdminCreateOrgUser(_UseCase):
+    def execute(self, actor: User, data: AdminCreateOrgUserInput) -> User:
+        if actor.role != Role.APP_ADMIN or data.role == Role.APP_ADMIN:
+            raise NotAuthorized()
+        if self._users.get_by_username(data.tenant_id, data.username) is not None:
+            raise UsernameTaken(data.username)
+
+        user = User(
+            id=uuid.uuid4(),
+            tenant_id=data.tenant_id,
+            username=data.username,
+            email=data.email,
+            password_hash=self._hasher.hash(data.password),
+            role=data.role,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._users.save(user)
+        return user
+
+
+@dataclass
+class AdminUpdateOrgUserInput:
+    user_id: uuid.UUID
+    username: Optional[str] = None
+    role: Optional[Role] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
+class AdminUpdateOrgUser(_UseCase):
+    def execute(self, actor: User, data: AdminUpdateOrgUserInput) -> User:
+        if actor.role != Role.APP_ADMIN:
+            raise NotAuthorized()
+        if data.role == Role.APP_ADMIN:
+            raise NotAuthorized()
+        user = self._users.get_by_id(data.user_id)
+        if user is None or user.tenant_id is None:  # not an org user - out of scope here
+            raise UserNotFound()
+
+        new_username = data.username.strip() if data.username else user.username
+        if new_username != user.username:
+            existing = self._users.get_by_username(user.tenant_id, new_username)
+            if existing is not None and existing.id != user.id:
+                raise UsernameTaken(new_username)
+
+        updated = User(
+            id=user.id,
+            tenant_id=user.tenant_id,
+            username=new_username,
+            email=data.email if data.email is not None else user.email,
+            password_hash=self._hasher.hash(data.password) if data.password else user.password_hash,
+            role=data.role or user.role,
+            created_at=user.created_at,
+        )
+        self._users.save(updated)
+        return updated
+
+
+class AdminDeleteOrgUser:
+    def __init__(self, users: UserRepository):
+        self._users = users
+
+    def execute(self, actor: User, user_id: uuid.UUID) -> None:
+        if actor.role != Role.APP_ADMIN:
+            raise NotAuthorized()
+        user = self._users.get_by_id(user_id)
+        if user is None or user.tenant_id is None:
+            raise UserNotFound()
+        self._users.delete(user_id)

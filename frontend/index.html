@@ -48,6 +48,7 @@
       <h1 id="score-title" class="score-title">Sin partitura</h1>
       <button type="button" id="theme-toggle" class="icon-btn" title="Cambiar entre tema claro y oscuro">☾</button>
       <div class="score-actions" id="score-actions" hidden>
+        <button type="button" id="save-score-btn">Guardar</button>
         <button type="button" id="download-musicxml">MusicXML</button>
         <button type="button" id="download-midi">MIDI</button>
       </div>
@@ -59,6 +60,9 @@
     <nav class="rail" id="rail">
       <button type="button" class="rail-btn" data-panel="panel-compose" title="Nueva composición">
         <span class="rail-icon">✦</span><span class="rail-label">Crear</span>
+      </button>
+      <button type="button" class="rail-btn" data-panel="panel-library" title="Partituras guardadas">
+        <span class="rail-icon">📁</span><span class="rail-label">Archivo</span>
       </button>
       <button type="button" class="rail-btn" data-panel="panel-score" title="Opciones de partitura">
         <span class="rail-icon">⚙</span><span class="rail-label">Partitura</span>
@@ -143,6 +147,17 @@
         <button type="button" id="blank-btn" class="secondary-btn">Empezar sin IA</button>
       </div>
       <p id="status" class="status"></p>
+    </div>
+  </section>
+
+  <section class="floating-panel" id="panel-library" hidden>
+    <header class="panel-header">
+      <span class="panel-title">📁 Partituras guardadas</span>
+      <button type="button" class="panel-close" title="Cerrar">✕</button>
+    </header>
+    <div class="panel-body">
+      <p class="panel-hint">Guardadas por cualquiera de tu organización. Al abrir una, se reemplaza la partitura actual.</p>
+      <div id="library-list" class="org-list"></div>
     </div>
   </section>
 

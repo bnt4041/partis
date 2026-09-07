@@ -3,8 +3,10 @@ import logging
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import scores_service
 from .auth import require_auth
 from .config import settings
+from .db import close_pool, open_pool
 from .deepseek_client import (
     DeepSeekError,
     build_chat_messages,
@@ -29,6 +31,9 @@ from .schemas import (
     ComposeResponse,
     RenderRequest,
     RenderResponse,
+    SaveScoreRequest,
+    ScoreDetail,
+    ScoreSummary,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +49,23 @@ app.add_middleware(
 )
 
 MAX_REPAIR_ATTEMPTS = 2
+
+
+@app.on_event("startup")
+def on_startup():
+    open_pool()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    close_pool()
+
+
+def _require_tenant(claims: dict) -> str:
+    tenant_id = claims.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tu cuenta no pertenece a ninguna organización.")
+    return tenant_id
 
 
 @app.get("/api/health")
@@ -168,3 +190,44 @@ async def render(req: RenderRequest, claims: dict = Depends(require_auth)):
 
     title = score_title(score, fallback="Partitura")
     return RenderResponse(title=title, musicxml=musicxml, midi_base64=midi_b64)
+
+
+# ===================== Saved scores (shared within the organization) =====================
+
+
+@app.post("/api/scores", response_model=ScoreDetail)
+async def save_score(req: SaveScoreRequest, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    score = scores_service.save_score(
+        tenant_id=tenant_id,
+        title=req.title.strip() or "Sin título",
+        abc=req.abc,
+        created_by=claims["sub"],
+        created_by_username=claims.get("username", ""),
+        score_id=req.score_id,
+    )
+    return ScoreDetail(**score)
+
+
+@app.get("/api/scores", response_model=list[ScoreSummary])
+async def list_scores(claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    return [ScoreSummary(**s) for s in scores_service.list_scores(tenant_id)]
+
+
+@app.get("/api/scores/{score_id}", response_model=ScoreDetail)
+async def get_score(score_id: str, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    try:
+        return ScoreDetail(**scores_service.get_score(tenant_id, score_id))
+    except scores_service.ScoreNotFound:
+        raise HTTPException(status_code=404, detail="Partitura no encontrada.")
+
+
+@app.delete("/api/scores/{score_id}", status_code=204)
+async def delete_score(score_id: str, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    try:
+        scores_service.delete_score(tenant_id, score_id)
+    except scores_service.ScoreNotFound:
+        raise HTTPException(status_code=404, detail="Partitura no encontrada.")

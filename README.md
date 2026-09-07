@@ -7,7 +7,7 @@ Composición musical asistida por IA (DeepSeek), con renderizado de partitura en
 - **backend/** — FastAPI. Pide a DeepSeek una pieza en notación ABC, la valida/convierte con `music21` a MusicXML + MIDI, con hasta 2 reintentos de auto-corrección si el ABC generado no es válido.
 - **frontend/** — HTML/JS estático servido por nginx (que también hace de proxy a `/api`). Renderiza y edita la partitura con [abcjs](https://www.abcjs.net/), incluyendo reproducción de audio con su synth integrado.
 - **auth/** — FastAPI, arquitectura hexagonal (dominio/aplicación/adaptadores). Registro y login multi-tenant (cada organización es un `tenant` con sus propios usuarios) emitiendo JWT propios. Preparado para sustituir el emisor/verificador de tokens por Keycloak más adelante sin tocar el dominio ni las rutas HTTP - ver `auth/app/domain/ports.py`.
-- **db/** — Postgres. Solo contiene el esquema `auth` (tenants/users) por ahora; pensado para alojar también los datos de la propia app (partituras guardadas, etc.) en otro esquema el día que eso exista.
+- **db/** — Postgres, un único volumen con nombre (`db_data`) que persiste entre reinicios/recreaciones de los contenedores (`docker compose down && docker compose up` incluido - solo se pierde si se borra el volumen a propósito, p. ej. `docker compose down -v`). Dos esquemas: `auth` (tenants/users) y `scores` (partituras guardadas).
 
 ## Arrancar
 
@@ -34,7 +34,7 @@ Composición musical asistida por IA (DeepSeek), con renderizado de partitura en
 
 **No hay alta pública.** Los roles son:
 
-- **`app_admin`** — administra la plataforma, no pertenece a ninguna organización. Es el único que puede crear (y editar el nombre de) organizaciones, desde una consola de administración propia, no el editor de partituras. Se crea automáticamente al primer arranque a partir de `ADMIN_BOOTSTRAP_USERNAME`/`ADMIN_BOOTSTRAP_PASSWORD` (`.env`).
+- **`app_admin`** — administra la plataforma, no pertenece a ninguna organización. Es el único que puede crear (y editar el nombre de) organizaciones, desde una consola de administración propia, no el editor de partituras. Desde ahí, desplegando "Usuarios" en cada organización, también puede ver, crear, editar (usuario/contraseña/rol) y eliminar cualquier usuario de cualquier organización - no solo los suyos, a diferencia de un `director`/`admin`. Se crea automáticamente al primer arranque a partir de `ADMIN_BOOTSTRAP_USERNAME`/`ADMIN_BOOTSTRAP_PASSWORD` (`.env`).
 - **`director`** — se crea junto con la organización (uno por organización). Puede crear `admin` o `musico` dentro de su organización.
 - **`admin`** — administrador de una organización, creado por su `director`. Puede crear `musico`.
 - **`musico`** — usuario normal, usa el editor de partituras.
@@ -84,3 +84,27 @@ curl -X POST http://localhost:3000/api/auth/org/users \
 Cada usuario pertenece a un `tenant_id` (`NULL` para un `app_admin`); el nombre de usuario solo tiene que ser único **dentro** de su organización (o entre los `app_admin`, que no tienen organización), no globalmente - por eso la misma persona puede tener cuentas independientes (mismo email, distinta contraseña si quiere) en varias organizaciones. No hay envío de email todavía (ni verificación de cuenta ni recuperación de contraseña).
 
 Por dentro sigue arquitectura hexagonal: `domain/` (entidades y *ports* - interfaces), `application/` (casos de uso, solo dependen de los *ports*, incluida toda la lógica de "qué rol puede crear qué rol" y la desambiguación del login), `adapters/` (implementaciones concretas: Postgres, bcrypt, JWT, y las rutas FastAPI). El día que se integre Keycloak, solo hace falta añadir un adaptador nuevo (p. ej. `KeycloakTokenIssuer`) y cambiar el cableado en `adapters/inbound/http/dependencies.py` - el dominio, los casos de uso y las rutas no cambian.
+
+## Partituras guardadas
+
+Cualquier usuario autenticado (`director`/`admin`/`musico`) puede guardar la partitura que esté editando con el botón **Guardar** de la barra superior - usa el título del campo `T:` del ABC. Si ya se había guardado antes en esta sesión (o se abrió una desde el archivo), "Guardar" la sobrescribe en el mismo sitio en vez de crear una copia; empezar una pieza nueva (con o sin IA) rompe ese vínculo, así que el siguiente "Guardar" crea una partitura distinta.
+
+El icono **Archivo** del lateral abre la lista de partituras guardadas por cualquiera de la organización (no son privadas por usuario), con quién la guardó y cuándo; "Abrir" carga esa partitura en el editor (sustituyendo la actual) y "🗑" la borra.
+
+Vive en `backend/` (tabla `scores.scores`, tenant-scoped igual que todo lo demás) en vez de en `auth/`, ya que es dominio "partituras" no "identidad" - el `backend` ya tenía la lógica de ABC/MusicXML y ahora también su propia conexión a Postgres (comparte el mismo `DATABASE_URL` que `auth`, cada uno con sus propias tablas).
+
+```bash
+# Guardar (crea nueva si no se manda score_id, sobrescribe si sí)
+curl -X POST http://localhost:3000/api/scores \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <token>" \
+  -d '{"title":"Vals de Otoño","abc":"X:1\nT:Vals de Otoño\nK:C\nC2 D2 E2 F2 |"}'
+
+# Listar las de mi organización
+curl http://localhost:3000/api/scores -H "Authorization: Bearer <token>"
+
+# Abrir una
+curl http://localhost:3000/api/scores/<id> -H "Authorization: Bearer <token>"
+
+# Borrar una
+curl -X DELETE http://localhost:3000/api/scores/<id> -H "Authorization: Bearer <token>"
+```

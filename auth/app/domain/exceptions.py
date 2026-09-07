@@ -18,6 +18,10 @@ class UsernameTaken(DomainError):
     pass
 
 
+class UserNotFound(DomainError):
+    pass
+
+
 class InvalidCredentials(DomainError):
     pass
 

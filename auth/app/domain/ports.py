@@ -57,6 +57,9 @@ class UserRepository(ABC):
     @abstractmethod
     def save(self, user: User) -> None: ...
 
+    @abstractmethod
+    def delete(self, user_id: UUID) -> None: ...
+
 
 class PasswordHasher(ABC):
     @abstractmethod

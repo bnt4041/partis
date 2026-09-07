@@ -76,6 +76,10 @@ class PostgresUserRepository(UserRepository):
                 ),
             )
 
+    def delete(self, user_id: UUID) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM auth.users WHERE id = %s", (user_id,))
+
     @staticmethod
     def _to_entity(row) -> User:
         return User(

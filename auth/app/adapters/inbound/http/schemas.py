@@ -91,3 +91,23 @@ class OrgUserResponse(BaseModel):
     user_id: str
     username: str
     role: str
+
+
+class AdminCreateOrgUserRequest(BaseModel):
+    """Only an app_admin can call this - unlike CreateOrgUserRequest, any
+    tenant role (including director) can be granted."""
+
+    username: str = Field(min_length=3, max_length=120, description="Usuario; puede ser su email.")
+    password: str = Field(min_length=8)
+    role: str = Field(pattern=r"^(director|admin|musico)$")
+    email: Optional[str] = None
+
+
+class AdminUpdateOrgUserRequest(BaseModel):
+    """All fields optional - only what's set is changed. Only an app_admin
+    can call this."""
+
+    username: Optional[str] = Field(default=None, min_length=3, max_length=120)
+    password: Optional[str] = Field(default=None, min_length=8)
+    role: Optional[str] = Field(default=None, pattern=r"^(director|admin|musico)$")
+    email: Optional[str] = None

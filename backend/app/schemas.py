@@ -44,3 +44,21 @@ class RenderResponse(BaseModel):
     title: str
     musicxml: str
     midi_base64: str
+
+
+class SaveScoreRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    abc: str = Field(..., min_length=1, max_length=20000)
+    score_id: Optional[str] = None  # set => overwrite that score instead of creating a new one
+
+
+class ScoreSummary(BaseModel):
+    id: str
+    title: str
+    created_by_username: Optional[str]
+    created_at: str
+    updated_at: str
+
+
+class ScoreDetail(ScoreSummary):
+    abc: str

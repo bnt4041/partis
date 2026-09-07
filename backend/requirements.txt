@@ -5,3 +5,5 @@ music21==9.3.0
 pydantic==2.9.2
 pydantic-settings==2.5.2
 pyjwt==2.9.0
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.4

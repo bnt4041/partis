@@ -15,6 +15,10 @@ from app.adapters.outbound.persistence.postgres_user_repository import PostgresU
 from app.adapters.outbound.security.bcrypt_password_hasher import BcryptPasswordHasher
 from app.adapters.outbound.security.jwt_token_issuer import JwtTokenIssuer
 from app.application.use_cases import (
+    AdminCreateOrgUser,
+    AdminDeleteOrgUser,
+    AdminListOrgUsers,
+    AdminUpdateOrgUser,
     CreateOrganization,
     CreateOrgUser,
     GetCurrentUser,
@@ -82,3 +86,19 @@ def get_own_organization() -> GetOwnOrganization:
 
 def get_update_organization() -> UpdateOrganization:
     return UpdateOrganization(get_tenant_repository())
+
+
+def get_admin_list_org_users() -> AdminListOrgUsers:
+    return AdminListOrgUsers(get_user_repository())
+
+
+def get_admin_create_org_user() -> AdminCreateOrgUser:
+    return AdminCreateOrgUser(get_tenant_repository(), get_user_repository(), get_password_hasher(), get_token_issuer())
+
+
+def get_admin_update_org_user() -> AdminUpdateOrgUser:
+    return AdminUpdateOrgUser(get_tenant_repository(), get_user_repository(), get_password_hasher(), get_token_issuer())
+
+
+def get_admin_delete_org_user() -> AdminDeleteOrgUser:
+    return AdminDeleteOrgUser(get_user_repository())

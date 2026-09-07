@@ -6,6 +6,11 @@ let synthControl = null;
 let cursorPos = 0;
 let chatHistory = [];
 
+// Set once a score has been saved (or opened from the library), so "Guardar"
+// overwrites that same record instead of creating a new one. Reset to null
+// whenever the editor starts a genuinely new piece (compose/blank).
+let currentScoreId = null;
+
 // Notes currently selected on the score (by text range), so the context menu
 // and the Delete key can act on them. Cleared on every setAbc() call since a
 // re-render invalidates both the char offsets and the abcjs element refs.
@@ -86,6 +91,7 @@ const lookState = { theme: "dark", font: "inter", scoreFont: "engraving", notati
 
 const PANEL_DEFAULT_POS = {
   "panel-compose": { x: 92, y: 78 },
+  "panel-library": { x: 105, y: 91 },
   "panel-score": { x: 118, y: 104 },
   "panel-staves": { x: 144, y: 130 },
   "panel-notes": { x: 170, y: 156 },
@@ -1397,7 +1403,15 @@ function showContextMenu(x, y, items) {
     const btn = document.createElement("button");
     btn.textContent = item.label;
     if (item.danger) btn.style.color = "var(--danger)";
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      // Items that open a submenu (e.g. "Añadir armadura") call
+      // showContextMenu() again from inside onClick(), which replaces this
+      // very button in the DOM. Without stopping propagation, this same
+      // click event then reaches the document-level "click outside closes
+      // the menu" listener below - and since the original target button no
+      // longer exists anywhere, contextMenuEl.contains(e.target) is false,
+      // so it immediately hides the submenu that was just opened.
+      e.stopPropagation();
       hideContextMenu();
       item.onClick();
     });
@@ -2039,6 +2053,7 @@ async function compose() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Error desconocido");
 
+    currentScoreId = null;
     setAbc(data.abc);
     setStatus("¡Listo!");
     openPanel("panel-notes");
@@ -2077,6 +2092,7 @@ function startBlank() {
     `${restToken} |`,
   ].join("\n");
 
+  currentScoreId = null;
   setAbc(abc);
   setStatus("Partitura en blanco lista para editar.");
   openPanel("panel-notes");
@@ -2118,6 +2134,114 @@ document.getElementById("download-midi").addEventListener("click", async () => {
     URL.revokeObjectURL(url);
   } catch (err) {
     setStatus(`Error al exportar: ${err.message}`, true);
+  }
+});
+
+// ===================== Saved scores (library, shared with the org) =======
+
+function formatScoreDate(iso) {
+  try {
+    return new Date(iso).toLocaleString("es-ES", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function buildScoreRow(score, onChanged) {
+  const row = document.createElement("div");
+  row.className = "org-row";
+
+  const left = document.createElement("span");
+  left.className = "org-row-name";
+  left.textContent = score.title;
+  row.appendChild(left);
+
+  const meta = document.createElement("span");
+  meta.className = "org-row-meta";
+  meta.textContent = `${score.created_by_username || "?"} · ${formatScoreDate(score.updated_at)}`;
+  row.appendChild(meta);
+
+  const openBtn = document.createElement("button");
+  openBtn.type = "button";
+  openBtn.className = "org-row-edit";
+  openBtn.textContent = "Abrir";
+  openBtn.title = "Abrir esta partitura (reemplaza la actual)";
+  openBtn.addEventListener("click", async () => {
+    try {
+      const data = await parseAuthResponse(await authFetch(`/api/scores/${score.id}`));
+      currentScoreId = data.id;
+      setAbc(data.abc);
+      setStatus(`Partitura "${data.title}" abierta.`);
+      closePanel("panel-library");
+    } catch (err) {
+      setStatus(`Error al abrir la partitura: ${err.message}`, true);
+    }
+  });
+  row.appendChild(openBtn);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "org-row-delete";
+  deleteBtn.textContent = "🗑";
+  deleteBtn.title = "Eliminar esta partitura";
+  deleteBtn.addEventListener("click", async () => {
+    if (!window.confirm(`¿Eliminar "${score.title}"? Esta acción no se puede deshacer.`)) return;
+    try {
+      await authFetch(`/api/scores/${score.id}`, { method: "DELETE" });
+      if (currentScoreId === score.id) currentScoreId = null;
+      onChanged();
+    } catch (err) {
+      setStatus(`Error al eliminar: ${err.message}`, true);
+    }
+  });
+  row.appendChild(deleteBtn);
+
+  return row;
+}
+
+async function loadScoreLibrary() {
+  const listEl = document.getElementById("library-list");
+  listEl.textContent = "Cargando...";
+  try {
+    const scoreList = await parseAuthResponse(await authFetch("/api/scores"));
+    listEl.innerHTML = "";
+    if (scoreList.length === 0) {
+      listEl.textContent = "Todavía no hay partituras guardadas.";
+      return;
+    }
+    scoreList.forEach((s) => listEl.appendChild(buildScoreRow(s, loadScoreLibrary)));
+  } catch (err) {
+    listEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+// Refresh the list every time the rail icon is used - harmless when it's
+// actually closing the panel, and means it's never stale when opened
+// (another org member may have saved/deleted something meanwhile).
+document.querySelector('[data-panel="panel-library"]').addEventListener("click", loadScoreLibrary);
+
+document.getElementById("save-score-btn").addEventListener("click", async () => {
+  if (!currentAbc.trim()) return;
+  const { headers } = parseAbcHeaders(currentAbc);
+  const title = (headers.T || "").trim() || "Sin título";
+  try {
+    const data = await parseAuthResponse(
+      await authFetch("/api/scores", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, abc: currentAbc, score_id: currentScoreId }),
+      })
+    );
+    currentScoreId = data.id;
+    setStatus(`Guardada "${data.title}".`);
+  } catch (err) {
+    setStatus(`Error al guardar: ${err.message}`, true);
   }
 });
 
@@ -2404,8 +2528,18 @@ function buildOrgRow(primaryText, secondaryText, roleText) {
 
 // An editable row: shows name + slug + a ✎ button that swaps the row for a
 // rename form (PATCH /admin/organizations/{id}), then swaps back.
-function buildEditableOrgRow(org) {
+// One organization: an editable row (name/slug/rename) plus a collapsible
+// panel underneath listing its users, with create/edit/delete - all as the
+// app_admin, for any organization (not just one they belong to).
+function buildOrgItem(org) {
+  const item = document.createElement("div");
+  item.className = "org-item";
+
   const row = document.createElement("div");
+  const usersPanel = document.createElement("div");
+  usersPanel.className = "org-users-panel";
+  usersPanel.hidden = true;
+  let usersLoaded = false;
 
   function renderView() {
     row.className = "org-row";
@@ -2418,6 +2552,21 @@ function buildEditableOrgRow(org) {
     meta.className = "org-row-meta";
     meta.textContent = org.slug;
     row.appendChild(meta);
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "org-toggle";
+    toggleBtn.textContent = usersPanel.hidden ? "▸ Usuarios" : "▾ Usuarios";
+    toggleBtn.addEventListener("click", () => {
+      usersPanel.hidden = !usersPanel.hidden;
+      if (!usersPanel.hidden && !usersLoaded) {
+        usersLoaded = true;
+        loadAdminOrgUsers(org, usersPanel);
+      }
+      renderView();
+    });
+    row.appendChild(toggleBtn);
+
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "org-row-edit";
@@ -2470,7 +2619,197 @@ function buildEditableOrgRow(org) {
   }
 
   renderView();
+  item.appendChild(row);
+  item.appendChild(usersPanel);
+  return item;
+}
+
+const ORG_USER_ROLE_LABELS = { director: "Director", admin: "Administrador", musico: "Músico" };
+
+function buildAdminUserRow(tenantId, u, onChanged) {
+  const row = document.createElement("div");
+
+  function renderView() {
+    row.className = "org-row";
+    row.innerHTML = "";
+    const left = document.createElement("span");
+    left.className = "org-row-name";
+    left.textContent = u.username;
+    row.appendChild(left);
+    const role = document.createElement("span");
+    role.className = "org-row-role";
+    role.textContent = ORG_USER_ROLE_LABELS[u.role] || u.role;
+    row.appendChild(role);
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "org-row-edit";
+    editBtn.textContent = "✎";
+    editBtn.title = "Editar usuario";
+    editBtn.addEventListener("click", renderEdit);
+    row.appendChild(editBtn);
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "org-row-delete";
+    deleteBtn.textContent = "🗑";
+    deleteBtn.title = "Eliminar usuario";
+    deleteBtn.addEventListener("click", async () => {
+      if (!window.confirm(`¿Eliminar a "${u.username}"? Esta acción no se puede deshacer.`)) return;
+      try {
+        await authFetch(`/api/auth/admin/users/${u.user_id}`, { method: "DELETE" });
+        onChanged();
+      } catch (err) {
+        setStatus(`Error al eliminar: ${err.message}`, true);
+      }
+    });
+    row.appendChild(deleteBtn);
+  }
+
+  // Three fields plus two buttons doesn't fit on one line at this panel's
+  // width - stack it instead of squeezing everything into the single-line
+  // .org-row-edit-form pattern (that one's fine for the org-rename case,
+  // which is just one input).
+  function renderEdit() {
+    row.className = "user-edit-form";
+    row.innerHTML = "";
+
+    const usernameInput = document.createElement("input");
+    usernameInput.type = "text";
+    usernameInput.value = u.username;
+    row.appendChild(usernameInput);
+
+    const fieldsRow = document.createElement("div");
+    fieldsRow.className = "user-edit-form-row";
+
+    const roleSelect = document.createElement("select");
+    ["director", "admin", "musico"].forEach((r) => {
+      const o = document.createElement("option");
+      o.value = r;
+      o.textContent = ORG_USER_ROLE_LABELS[r];
+      if (r === u.role) o.selected = true;
+      roleSelect.appendChild(o);
+    });
+    fieldsRow.appendChild(roleSelect);
+
+    const passwordInput = document.createElement("input");
+    passwordInput.type = "password";
+    passwordInput.placeholder = "Nueva contraseña (opcional)";
+    passwordInput.autocomplete = "new-password";
+    fieldsRow.appendChild(passwordInput);
+    row.appendChild(fieldsRow);
+
+    const actions = document.createElement("div");
+    actions.className = "user-edit-form-actions";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "Guardar";
+    saveBtn.addEventListener("click", async () => {
+      const body = {};
+      const newUsername = usernameInput.value.trim();
+      if (newUsername && newUsername !== u.username) body.username = newUsername;
+      if (roleSelect.value !== u.role) body.role = roleSelect.value;
+      if (passwordInput.value) body.password = passwordInput.value;
+      if (Object.keys(body).length === 0) {
+        renderView();
+        return;
+      }
+      try {
+        await parseAuthResponse(
+          await authFetch(`/api/auth/admin/users/${u.user_id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        );
+        onChanged();
+      } catch (err) {
+        setStatus(`Error al editar el usuario: ${err.message}`, true);
+        renderView();
+      }
+    });
+    actions.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "Cancelar";
+    cancelBtn.addEventListener("click", renderView);
+    actions.appendChild(cancelBtn);
+
+    row.appendChild(actions);
+  }
+
+  renderView();
   return row;
+}
+
+async function loadAdminOrgUsers(org, panelEl) {
+  panelEl.innerHTML = "";
+
+  const form = document.createElement("form");
+  form.className = "mini-user-form";
+  const usernameInput = document.createElement("input");
+  usernameInput.type = "text";
+  usernameInput.placeholder = "Usuario o email";
+  usernameInput.required = true;
+  form.appendChild(usernameInput);
+  const passwordInput = document.createElement("input");
+  passwordInput.type = "password";
+  passwordInput.placeholder = "Contraseña";
+  passwordInput.minLength = 8;
+  passwordInput.required = true;
+  passwordInput.autocomplete = "new-password";
+  form.appendChild(passwordInput);
+  const roleSelect = document.createElement("select");
+  ["musico", "admin", "director"].forEach((r) => {
+    const o = document.createElement("option");
+    o.value = r;
+    o.textContent = ORG_USER_ROLE_LABELS[r];
+    roleSelect.appendChild(o);
+  });
+  form.appendChild(roleSelect);
+  const addBtn = document.createElement("button");
+  addBtn.type = "submit";
+  addBtn.textContent = "+ Añadir";
+  form.appendChild(addBtn);
+  panelEl.appendChild(form);
+
+  const statusEl = document.createElement("p");
+  statusEl.className = "status auth-status";
+  panelEl.appendChild(statusEl);
+
+  const listEl = document.createElement("div");
+  listEl.className = "org-list";
+  panelEl.appendChild(listEl);
+
+  const refresh = () => loadAdminOrgUsers(org, panelEl);
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthFormStatus(statusEl, "Creando...");
+    try {
+      await parseAuthResponse(
+        await authFetch(`/api/auth/admin/organizations/${org.tenant_id}/users`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value, role: roleSelect.value }),
+        })
+      );
+      refresh();
+    } catch (err) {
+      setAuthFormStatus(statusEl, err.message, true);
+    }
+  });
+
+  try {
+    const users = await parseAuthResponse(await authFetch(`/api/auth/admin/organizations/${org.tenant_id}/users`));
+    if (users.length === 0) {
+      listEl.textContent = "Sin usuarios.";
+    } else {
+      users.forEach((u) => listEl.appendChild(buildAdminUserRow(org.tenant_id, u, refresh)));
+    }
+  } catch (err) {
+    listEl.textContent = `Error: ${err.message}`;
+  }
 }
 
 async function loadOrganizations() {
@@ -2483,7 +2822,7 @@ async function loadOrganizations() {
       listEl.textContent = "Todavía no hay organizaciones.";
       return;
     }
-    orgs.forEach((org) => listEl.appendChild(buildEditableOrgRow(org)));
+    orgs.forEach((org) => listEl.appendChild(buildOrgItem(org)));
   } catch (err) {
     listEl.textContent = `Error: ${err.message}`;
   }

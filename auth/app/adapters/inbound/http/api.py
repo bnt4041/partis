@@ -6,6 +6,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.adapters.inbound.http import dependencies as deps
 from app.adapters.inbound.http.schemas import (
+    AdminCreateOrgUserRequest,
+    AdminUpdateOrgUserRequest,
     AuthResponse,
     CreateOrganizationRequest,
     CreateOrgUserRequest,
@@ -20,6 +22,8 @@ from app.adapters.inbound.http.schemas import (
 )
 from app.application.use_cases import (
     PLATFORM_SENTINEL,
+    AdminCreateOrgUserInput,
+    AdminUpdateOrgUserInput,
     AuthResult,
     CreateOrganizationInput,
     CreateOrgUserInput,
@@ -29,7 +33,14 @@ from app.application.use_cases import (
     UpdateOrganizationInput,
 )
 from app.domain.entities import Role, Tenant, User
-from app.domain.exceptions import AmbiguousLogin, InvalidCredentials, NotAuthorized, TenantNotFound, UsernameTaken
+from app.domain.exceptions import (
+    AmbiguousLogin,
+    InvalidCredentials,
+    NotAuthorized,
+    TenantNotFound,
+    UserNotFound,
+    UsernameTaken,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -68,6 +79,10 @@ def _org_summary(tenant: Tenant) -> OrganizationSummary:
 
 def _org_user_response(result: OrgUserResult) -> OrgUserResponse:
     return OrgUserResponse(user_id=str(result.user_id), username=result.username, role=result.role)
+
+
+def _user_summary(user: User) -> OrgUserSummary:
+    return OrgUserSummary(user_id=str(user.id), username=user.username, email=user.email, role=user.role.value)
 
 
 @router.get("/health")
@@ -158,6 +173,97 @@ def update_organization(
     return _org_summary(tenant)
 
 
+@router.get("/admin/organizations/{tenant_id}/users", response_model=list[OrgUserSummary])
+def admin_list_org_users(
+    tenant_id: str,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_admin_list_org_users),
+):
+    try:
+        tenant_uuid = UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Identificador de organización inválido.")
+    try:
+        users = use_case.execute(user, tenant_uuid)
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede ver estos usuarios.")
+    return [_user_summary(u) for u in users]
+
+
+@router.post("/admin/organizations/{tenant_id}/users", response_model=OrgUserSummary, status_code=status.HTTP_201_CREATED)
+def admin_create_org_user(
+    tenant_id: str,
+    body: AdminCreateOrgUserRequest,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_admin_create_org_user),
+):
+    try:
+        tenant_uuid = UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Identificador de organización inválido.")
+    try:
+        created = use_case.execute(
+            user,
+            AdminCreateOrgUserInput(
+                tenant_id=tenant_uuid, username=body.username, password=body.password, role=Role(body.role), email=body.email
+            ),
+        )
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede crear este usuario.")
+    except UsernameTaken:
+        raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está en uso en esa organización.")
+    return _user_summary(created)
+
+
+@router.patch("/admin/users/{user_id}", response_model=OrgUserSummary)
+def admin_update_org_user(
+    user_id: str,
+    body: AdminUpdateOrgUserRequest,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_admin_update_org_user),
+):
+    try:
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Identificador de usuario inválido.")
+    try:
+        updated = use_case.execute(
+            user,
+            AdminUpdateOrgUserInput(
+                user_id=user_uuid,
+                username=body.username,
+                role=Role(body.role) if body.role else None,
+                email=body.email,
+                password=body.password,
+            ),
+        )
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede editar este usuario.")
+    except UsernameTaken:
+        raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está en uso en esa organización.")
+    except UserNotFound:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    return _user_summary(updated)
+
+
+@router.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_org_user(
+    user_id: str,
+    user: User = Depends(current_user),
+    use_case=Depends(deps.get_admin_delete_org_user),
+):
+    try:
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Identificador de usuario inválido.")
+    try:
+        use_case.execute(user, user_uuid)
+    except NotAuthorized:
+        raise HTTPException(status_code=403, detail="Solo un administrador de la aplicación puede eliminar este usuario.")
+    except UserNotFound:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+
 # ---------------------------------------------------------------------------
 # Org director/admin: create/list the users of their own tenant.
 # ---------------------------------------------------------------------------
@@ -187,9 +293,7 @@ def list_org_users(user: User = Depends(current_user), use_case=Depends(deps.get
         users = use_case.execute(user)
     except NotAuthorized:
         raise HTTPException(status_code=403, detail="Solo el director o un administrador de la organización pueden ver esta lista.")
-    return [
-        OrgUserSummary(user_id=str(u.id), username=u.username, email=u.email, role=u.role.value) for u in users
-    ]
+    return [_user_summary(u) for u in users]
 
 
 @router.get("/org/me", response_model=OrganizationSummary)

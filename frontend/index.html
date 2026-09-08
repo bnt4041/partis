@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Partis — Editor de partituras con IA</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
@@ -50,12 +51,7 @@
       <div class="score-actions" id="score-actions" hidden>
         <button type="button" id="undo-btn" class="icon-btn" title="Deshacer (Ctrl+Z)" disabled>↶</button>
         <button type="button" id="redo-btn" class="icon-btn" title="Rehacer (Ctrl+Y)" disabled>↷</button>
-        <button type="button" id="versions-btn" title="Ver versiones anteriores">Versiones</button>
-        <button type="button" id="new-version-btn" title="Guarda lo que hay ahora mismo como una versión nueva, sin tocar la partitura guardada">Nueva versión</button>
-        <button type="button" id="autosave-btn" title="Autoguardado: guarda los cambios automáticamente cada poco">Autoguardado</button>
-        <button type="button" id="save-score-btn">Guardar</button>
-        <button type="button" id="download-musicxml">MusicXML</button>
-        <button type="button" id="download-midi">MIDI</button>
+        <button type="button" id="score-menu-btn" title="Guardar, versiones y exportar">Guardar ▾</button>
       </div>
     </div>
   </header>

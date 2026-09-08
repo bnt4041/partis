@@ -29,7 +29,7 @@ const playbackStatusEl = document.getElementById("playback-status");
 const abcTextarea = document.getElementById("abc-source");
 const undoBtn = document.getElementById("undo-btn");
 const redoBtn = document.getElementById("redo-btn");
-const versionsBtn = document.getElementById("versions-btn");
+const scoreMenuBtn = document.getElementById("score-menu-btn");
 
 const stageEl = document.getElementById("stage");
 const sheetEl = document.getElementById("sheet");
@@ -3725,16 +3725,16 @@ async function renderCurrentAbc() {
   return data;
 }
 
-document.getElementById("download-musicxml").addEventListener("click", async () => {
+async function downloadMusicXml() {
   try {
     const data = await renderCurrentAbc();
     downloadText("partitura.musicxml", data.musicxml, "application/vnd.recordare.musicxml+xml");
   } catch (err) {
     setStatus(`Error al exportar: ${err.message}`, true);
   }
-});
+}
 
-document.getElementById("download-midi").addEventListener("click", async () => {
+async function downloadMidi() {
   try {
     const data = await renderCurrentAbc();
     const url = base64ToBlobUrl(data.midi_base64, "audio/midi");
@@ -3746,7 +3746,7 @@ document.getElementById("download-midi").addEventListener("click", async () => {
   } catch (err) {
     setStatus(`Error al exportar: ${err.message}`, true);
   }
-});
+}
 
 // ===================== Saved scores (library, shared with the org) =======
 
@@ -3838,11 +3838,7 @@ async function loadScoreLibrary() {
 // (another org member may have saved/deleted something meanwhile).
 document.querySelector('[data-panel="panel-library"]').addEventListener("click", loadScoreLibrary);
 
-document.getElementById("save-score-btn").addEventListener("click", async () => {
-  await saveScore({ confirmOverwrite: true });
-});
-
-// Shared by the "Guardar" button and autosave. `confirmOverwrite` asks first
+// Shared by the score menu's "Guardar" item and autosave. `confirmOverwrite` asks first
 // when this would overwrite an already-saved piece (autosave skips that -
 // asking on every tick would defeat the point) - either way, the previous
 // content isn't lost: the backend archives it as a version before
@@ -3892,7 +3888,7 @@ async function saveScore({ confirmOverwrite = false, silent = false } = {}) {
 // archives what was there before (see scores_service.save_score) - this is
 // just a way to browse and reopen those snapshots, the same "Abrir"
 // interaction the library panel already uses for whole scores.
-versionsBtn.addEventListener("click", async () => {
+async function showVersionsMenu() {
   if (!currentScoreId) {
     setStatus("Guarda la partitura al menos una vez para tener versiones.", true);
     return;
@@ -3908,7 +3904,7 @@ versionsBtn.addEventListener("click", async () => {
     setStatus("Esta partitura todavía no tiene versiones anteriores guardadas.");
     return;
   }
-  const rect = versionsBtn.getBoundingClientRect();
+  const rect = scoreMenuBtn.getBoundingClientRect();
   showContextMenu(
     rect.left,
     rect.bottom + 4,
@@ -3926,12 +3922,12 @@ versionsBtn.addEventListener("click", async () => {
       },
     }))
   );
-});
+}
 
 // Checkpoint whatever's in the editor right now as a version of its own,
 // without touching the "official" saved copy (unlike Guardar, which always
 // updates it) - so you can keep iterating without losing this exact state.
-document.getElementById("new-version-btn").addEventListener("click", async () => {
+async function createNewVersion() {
   if (!currentScoreId) {
     setStatus("Guarda la partitura al menos una vez para poder crear versiones.", true);
     return;
@@ -3951,21 +3947,20 @@ document.getElementById("new-version-btn").addEventListener("click", async () =>
   } catch (err) {
     setStatus(`Error al crear la versión: ${err.message}`, true);
   }
-});
+}
 
 // ===================== Autosave =====================
 //
-// Off by default, remembered per browser like the metronome. While on, it
-// silently re-runs the same save Guardar would (title from the ABC's own T:,
-// same score_id) shortly after an edit settles down - never on every single
-// keystroke, and never while there's nothing to save yet (before the first
-// manual Guardar) or nothing has actually changed since the last save.
+// Off by default, remembered per browser like the metronome used to be. While
+// on, it silently re-runs the same save Guardar would (title from the ABC's
+// own T:, same score_id) shortly after an edit settles down - never on every
+// single keystroke, and never while there's nothing to save yet (before the
+// first manual Guardar) or nothing has actually changed since the last save.
 
 const AUTOSAVE_DEBOUNCE_MS = 15000;
 let autosaveOn = false;
 let autosaveTimer = null;
 let lastAutosavedAbc = null;
-const autosaveBtn = document.getElementById("autosave-btn");
 
 function scheduleAutosave() {
   if (!autosaveOn || !currentScoreId) return;
@@ -3979,10 +3974,7 @@ function scheduleAutosave() {
 
 function setAutosave(on) {
   autosaveOn = on;
-  autosaveBtn.classList.toggle("is-on", on);
-  autosaveBtn.title = on
-    ? "Autoguardado activado - pulsa para desactivar"
-    : "Autoguardado: guarda los cambios automáticamente cada poco";
+  scoreMenuBtn.classList.toggle("is-on", on);
   saveStoredState("partis.autosave", { on });
   if (on) {
     if (!currentScoreId) {
@@ -3996,8 +3988,39 @@ function setAutosave(on) {
   }
 }
 
-autosaveBtn.addEventListener("click", () => setAutosave(!autosaveOn));
 setAutosave(!!loadStoredState("partis.autosave", { on: false }).on);
+
+// ===================== Score menu (Guardar/versiones/exportar) =====================
+//
+// One dropdown instead of a row of buttons - Guardar, versiones and export
+// are all occasional actions, not something reached for every few seconds
+// like the note palette, so they don't need to sit spelled out in the topbar.
+
+function buildScoreMenu() {
+  return [
+    { label: "Guardar", onClick: () => saveScore({ confirmOverwrite: true }) },
+    { label: "Nueva versión", onClick: createNewVersion },
+    { label: "Versiones", onClick: showVersionsMenu },
+    { separator: true },
+    {
+      label: autosaveOn ? "Autoguardado: activado ✓" : "Autoguardado: desactivado",
+      onClick: () => setAutosave(!autosaveOn),
+    },
+    { separator: true },
+    { label: "Descargar MusicXML", onClick: downloadMusicXml },
+    { label: "Descargar MIDI", onClick: downloadMidi },
+  ];
+}
+
+scoreMenuBtn.addEventListener("click", (e) => {
+  // Same reasoning as the submenu buttons inside showContextMenu(): this
+  // click is still bubbling when the menu opens, and would otherwise reach
+  // the document-level "click outside closes the menu" listener right after
+  // and immediately close what was just opened.
+  e.stopPropagation();
+  const rect = scoreMenuBtn.getBoundingClientRect();
+  showContextMenu(rect.left, rect.bottom + 4, buildScoreMenu());
+});
 
 // ===================== Chat with AI =====================
 

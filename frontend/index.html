@@ -44,15 +44,14 @@
     <div class="topbar-right">
       <div class="auth-indicator" id="auth-indicator" hidden>
         <span id="auth-user-label" class="auth-user-label"></span>
-        <button type="button" id="logout-btn" class="icon-btn" title="Cerrar sesión">⏻</button>
       </div>
       <h1 id="score-title" class="score-title">Sin partitura</h1>
       <button type="button" id="theme-toggle" class="icon-btn" title="Cambiar entre tema claro y oscuro">☾</button>
       <div class="score-actions" id="score-actions" hidden>
         <button type="button" id="undo-btn" class="icon-btn" title="Deshacer (Ctrl+Z)" disabled>↶</button>
         <button type="button" id="redo-btn" class="icon-btn" title="Rehacer (Ctrl+Y)" disabled>↷</button>
-        <button type="button" id="score-menu-btn" title="Guardar, versiones y exportar">Guardar ▾</button>
       </div>
+      <button type="button" id="app-menu-btn" title="Nuevo, archivo, guardar, versiones, exportar, perfil...">Menú ▾</button>
     </div>
   </header>
 
@@ -299,6 +298,7 @@
             <button type="button" id="repeat-end-btn">:|</button>
             <button type="button" id="ending1-btn" title="Primera vez">|1</button>
             <button type="button" id="ending2-btn" title="Segunda vez">|2</button>
+            <button type="button" id="final-barline-btn" title="Barra final: marca el fin de la partitura">Fin |]</button>
           </div>
         </div>
       </div>

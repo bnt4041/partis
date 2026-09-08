@@ -29,7 +29,7 @@ const playbackStatusEl = document.getElementById("playback-status");
 const abcTextarea = document.getElementById("abc-source");
 const undoBtn = document.getElementById("undo-btn");
 const redoBtn = document.getElementById("redo-btn");
-const scoreMenuBtn = document.getElementById("score-menu-btn");
+const appMenuBtn = document.getElementById("app-menu-btn");
 
 const stageEl = document.getElementById("stage");
 const sheetEl = document.getElementById("sheet");
@@ -765,6 +765,105 @@ function currentMeasureStart(fullText, insertAt) {
   return start;
 }
 
+// abcjs's own startChar/endChar for a note include its trailing whitespace
+// up to the next token, and everything here works in that same convention
+// (see insertPaletteItem's own text-building) - so a group's span has to
+// extend past it too, or landing an insertion right at that boundary would
+// glue the new token straight onto the group's last note with no space.
+function spanEndPastWhitespace(text, k) {
+  let end = k;
+  while (end < text.length && /\s/.test(text[end])) end += 1;
+  return end;
+}
+
+// Every COMPLETE tuplet group's [charAfterMarker, charAfterLastNote) span in
+// `text`. ABC counts a group's membership purely by position - the next N
+// notes/rests after its "(N" marker, no explicit end marker - never by
+// character range, so this has to walk the same way sumMeasureUnits() does
+// to know where each group actually ends. A group left incomplete (still
+// being placed - see applyTupletMarker/tupletState) never closes here, so it
+// can't block insertions right after its own last note so far.
+function findTupletSpans(text) {
+  const spans = [];
+  let k = 0;
+  let tupletLeft = 0;
+  let groupStart = null;
+  while (k < text.length) {
+    const ch = text[k];
+    if (ch === '"') {
+      const end = text.indexOf('"', k + 1);
+      if (end === -1) break;
+      k = end + 1;
+      continue;
+    }
+    if (ch === "!") {
+      const end = text.indexOf("!", k + 1);
+      if (end === -1) break;
+      k = end + 1;
+      continue;
+    }
+    if (ch === "|") {
+      tupletLeft = 0; // a group never crosses a barline
+      groupStart = null;
+      k += 1;
+      continue;
+    }
+    if (ch === "(" && /\d/.test(text[k + 1] || "")) {
+      tupletLeft = parseInt(text[k + 1], 10);
+      groupStart = k;
+      k += 2;
+      continue;
+    }
+    if (ch === "(" || ch === ")" || ch === "-" || ch === ">" || ch === "<") {
+      k += 1;
+      continue;
+    }
+    if (ch === "[" && !/^\[[A-Za-z]:/.test(text.slice(k))) {
+      const end = text.indexOf("]", k + 1);
+      if (end === -1) break;
+      const durMatch = text.slice(end + 1).match(/^(\d*\/?\d*)/);
+      k = end + 1 + (durMatch ? durMatch[0].length : 0);
+      if (tupletLeft > 0 && --tupletLeft === 0) {
+        spans.push([groupStart, spanEndPastWhitespace(text, k)]);
+        groupStart = null;
+      }
+      continue;
+    }
+    const fieldMatch = text.slice(k).match(/^\[[A-Za-z]:[^\]]*\]/);
+    if (fieldMatch) {
+      k += fieldMatch[0].length;
+      continue;
+    }
+    const noteMatch = text.slice(k).match(/^(\^{1,2}|_{1,2}|=)?[A-Ga-gxXzZ][,']*(\d*\/?\d*)/);
+    if (noteMatch) {
+      k += noteMatch[0].length;
+      if (tupletLeft > 0 && --tupletLeft === 0) {
+        spans.push([groupStart, spanEndPastWhitespace(text, k)]);
+        groupStart = null;
+      }
+      continue;
+    }
+    k += 1;
+  }
+  return spans;
+}
+
+// If `insertAt` falls STRICTLY inside an existing (complete) tuplet group's
+// note span, a new note landing there would silently steal one of the
+// group's slots and push its real last note out of the group - e.g. "(3C D
+// E" gets a note added "before" what looked like the end but is actually
+// between D and E, and it silently becomes "(3C D [new]", with E now a
+// plain, un-grouped note. This nudges the insertion point to right after the
+// whole group instead, so it lands safely outside it. Exactly at either
+// boundary (right before the marker, or right after the group's last note)
+// isn't "inside" and is left alone.
+function pushPastActiveTuplet(text, insertAt) {
+  for (const [start, end] of findTupletSpans(text)) {
+    if (insertAt > start && insertAt < end) return end;
+  }
+  return insertAt;
+}
+
 // abcjs's own default "p notes in the time of q" ratios (from its tokenizer,
 // tripletQ table) for a bare "(p" marker with no explicit ":q:r". A tuplet's
 // written notes DON'T reduce their own duration digits - "(3" just means the
@@ -1131,6 +1230,16 @@ function pickElementNearPoint(elements, svgPt, clientY, xTolerance) {
   return best;
 }
 
+// The smallest SVG-space x distance from svgX to any of this note's actual
+// noteheads - abselem.x itself is only the token's overall anchor (roughly
+// its stem), which for a chord staggered sideways (two notes a 2nd apart
+// draw side by side, not stacked) can be a fair bit off from where an
+// offset notehead actually sits. Infinity if there's nothing to check.
+function closestHeadSvgDistance(abselem, svgX) {
+  const heads = (abselem && abselem.heads) || [];
+  return heads.reduce((min, h) => (typeof h.x === "number" ? Math.min(min, Math.abs(h.x - svgX)) : min), Infinity);
+}
+
 // Given a drop point in page coordinates, find the closest staff, compute the
 // pitch from vertical distance to its top line, and find which existing
 // note/rest/bar it should be inserted after based on horizontal position.
@@ -1338,6 +1447,96 @@ function stripAnnotations(text) {
   return text.replace(/"[^"]*"/g, "").replace(/![^!]*!/g, "");
 }
 
+// Rewrite every PLAIN pitch (no accidental of its own already - those always
+// sound exactly as written, whatever the key signature says, so they're left
+// alone) in `text` so it keeps sounding the same under `newMap` as it did
+// under `oldMap`. Walks the raw ABC character by character rather than a
+// blind regex, the same way sumMeasureUnits() does, so it never touches text
+// inside a quoted chord symbol, a !decoration!, or an inline [M:...] field -
+// only actual note letters.
+function rewriteNotesForKeyChange(text, oldMap, newMap) {
+  function rewritePitch(acc, letter, octave) {
+    if (acc) return `${acc}${letter}${octave}`;
+    const upper = letter.toUpperCase();
+    const oldAcc = oldMap[upper] || "";
+    const newAcc = newMap[upper] || "";
+    if (oldAcc === newAcc) return `${letter}${octave}`;
+    return `${oldAcc || "="}${letter}${octave}`;
+  }
+
+  let out = "";
+  let k = 0;
+  while (k < text.length) {
+    const ch = text[k];
+    if (ch === '"') {
+      const end = text.indexOf('"', k + 1);
+      if (end === -1) {
+        out += text.slice(k);
+        break;
+      }
+      out += text.slice(k, end + 1);
+      k = end + 1;
+      continue;
+    }
+    if (ch === "!") {
+      const end = text.indexOf("!", k + 1);
+      if (end === -1) {
+        out += text.slice(k);
+        break;
+      }
+      out += text.slice(k, end + 1);
+      k = end + 1;
+      continue;
+    }
+    if (ch === "[") {
+      const fieldMatch = text.slice(k).match(/^\[[A-Za-z]:[^\]]*\]/);
+      if (fieldMatch) {
+        out += fieldMatch[0];
+        k += fieldMatch[0].length;
+        continue;
+      }
+      const end = text.indexOf("]", k + 1);
+      if (end === -1) {
+        out += text.slice(k);
+        break;
+      }
+      const inner = text.slice(k + 1, end);
+      const rewrittenInner = inner.replace(/(\^{1,2}|_{1,2}|=)?([A-Ga-g])([,']*)/g, (m, acc, letter, oct) =>
+        rewritePitch(acc || "", letter, oct)
+      );
+      out += `[${rewrittenInner}]`;
+      k = end + 1;
+      continue;
+    }
+    const noteMatch = text.slice(k).match(/^(\^{1,2}|_{1,2}|=)?([A-Ga-g])([,']*)/);
+    if (noteMatch) {
+      out += rewritePitch(noteMatch[1] || "", noteMatch[2], noteMatch[3]);
+      k += noteMatch[0].length;
+      continue;
+    }
+    out += ch;
+    k += 1;
+  }
+  return out;
+}
+
+// A key signature change only affects the CURRENT voice from that point
+// onward - up to wherever that context ends (another inline [K:...], a K:
+// header line, or the next V: header). Everything in that zone gets
+// rewritten so it keeps sounding like it did under the previous key.
+function preserveSoundAcrossKeyChange(abc, zoneStart, oldKeyValue, newKeyValue) {
+  const oldMap = keySignatureAccidentals(oldKeyValue);
+  const newMap = keySignatureAccidentals(newKeyValue);
+  if (Object.keys(oldMap).every((letter) => oldMap[letter] === newMap[letter])) return abc; // same accidentals: nothing could have changed sound
+
+  const rest = abc.slice(zoneStart);
+  const boundaryMatch = rest.match(/\[K:[^\]]*\]|^K:.*$|^V:\s*\S+.*$/m);
+  const zoneEnd = boundaryMatch ? zoneStart + boundaryMatch.index : abc.length;
+
+  const rewrittenZone = rewriteNotesForKeyChange(abc.slice(zoneStart, zoneEnd), oldMap, newMap);
+  return abc.slice(0, zoneStart) + rewrittenZone + abc.slice(zoneEnd);
+}
+
 // What accidental (possibly none) needs to be WRITTEN for `pitchAbsolute` to
 // actually sound like the key signature says it should, given what's already
 // been explicitly written on that same pitch (same letter+octave) earlier in
@@ -1368,6 +1567,9 @@ function resolveNormalAccidental(measureText, keyValue, pitchAbsolute) {
 // long for the space that's left.
 function insertPaletteItem(insertAt, kind, duration, pitchAbsolute, opts = {}) {
   const pitchToken = opts.pitchToken || null;
+  // Never insert in the middle of an already-complete tuplet group - see
+  // pushPastActiveTuplet().
+  insertAt = pushPastActiveTuplet(currentAbc, insertAt);
   const { headers } = parseAbcHeaders(currentAbc);
   const measureStart = currentMeasureStart(currentAbc, insertAt);
   const measureTextSoFar = currentAbc.slice(measureStart, insertAt);
@@ -1496,17 +1698,41 @@ function flashPlaybackStatus(message, ms = 1400) {
 // ===================== Note selection (for the context menu & Delete) ======
 //
 // abcjs's own AbsoluteElement exposes highlight()/unhighlight() (it's what it
-// uses internally to mark a dragged note), so we reuse that for our own
-// selection highlight instead of drawing anything extra.
+// uses internally to mark a dragged note) for a whole note/chord token - used
+// as-is for a plain note (there's only one notehead anyway) or a multi-note
+// selection. A single click that lands on one specific notehead of a chord
+// instead highlights just that notehead (chordPitchIndex >= 0 on the
+// selection entry), the same color, so a chord's notes are each pickable on
+// their own instead of always the whole stack together.
+
+const NOTE_SELECTION_COLOR = "#5f8dff"; // must match the selectionColor passed to ABCJS.renderAbc
+
+function highlightChordHead(abselem, index, on) {
+  const h = abselem && abselem.heads && abselem.heads[index];
+  if (!h || !h.graphelem) return;
+  h.graphelem.style.fill = on ? NOTE_SELECTION_COLOR : "";
+}
+
+function highlightEntry(entry) {
+  try {
+    if (entry.chordPitchIndex >= 0) highlightChordHead(entry.abselem, entry.chordPitchIndex, true);
+    else if (entry.abselem && entry.abselem.highlight) entry.abselem.highlight();
+  } catch {
+    /* ignore */
+  }
+}
+
+function unhighlightEntry(entry) {
+  try {
+    if (entry.chordPitchIndex >= 0) highlightChordHead(entry.abselem, entry.chordPitchIndex, false);
+    else if (entry.abselem && entry.abselem.unhighlight) entry.abselem.unhighlight();
+  } catch {
+    /* the SVG behind it may already be gone after a re-render */
+  }
+}
 
 function unhighlightSelection() {
-  noteSelection.forEach((n) => {
-    try {
-      if (n.abselem && n.abselem.unhighlight) n.abselem.unhighlight();
-    } catch {
-      /* the SVG behind it may already be gone after a re-render */
-    }
-  });
+  noteSelection.forEach(unhighlightEntry);
 }
 
 function clearNoteSelectionState() {
@@ -1514,29 +1740,30 @@ function clearNoteSelectionState() {
   noteSelection = [];
 }
 
-function selectNoteRange(start, end, abselem, additive) {
+// chordPitchIndex >= 0 means this selection is just ONE pitch of a chord
+// (from clicking a specific notehead - see chordPitchIndexAtClick); -1 (the
+// default) is the previous, whole-token behaviour every bulk operation
+// (Figura, Copiar, Grupo especial...) still expects, so additive/multi-select
+// - meant for bulk operations across several different notes - always stays
+// whole-token even when the click that added an entry landed on one pitch of
+// a chord.
+function selectNoteRange(start, end, abselem, additive, chordPitchIndex = -1) {
   const idx = noteSelection.findIndex((n) => n.start === start && n.end === end);
   if (additive) {
     if (idx !== -1) {
-      try {
-        noteSelection[idx].abselem && noteSelection[idx].abselem.unhighlight();
-      } catch {
-        /* ignore */
-      }
+      unhighlightEntry(noteSelection[idx]);
       noteSelection.splice(idx, 1);
       return;
     }
-    noteSelection.push({ start, end, abselem });
-  } else {
-    if (idx !== -1 && noteSelection.length === 1) return; // already the sole selection
-    unhighlightSelection();
-    noteSelection = [{ start, end, abselem }];
+    const entry = { start, end, abselem, chordPitchIndex: -1 };
+    noteSelection.push(entry);
+    highlightEntry(entry);
+    return;
   }
-  try {
-    if (abselem && abselem.highlight) abselem.highlight();
-  } catch {
-    /* ignore */
-  }
+  if (idx !== -1 && noteSelection.length === 1 && noteSelection[0].chordPitchIndex === chordPitchIndex) return; // already exactly this
+  unhighlightSelection();
+  noteSelection = [{ start, end, abselem, chordPitchIndex }];
+  highlightEntry(noteSelection[0]);
 }
 
 function handleScoreInteraction(abcelem, tuneNumber, classes, analysis, drag, mouseEvent) {
@@ -1560,9 +1787,15 @@ function handleScoreInteraction(abcelem, tuneNumber, classes, analysis, drag, mo
 
   // Plain click (no drag): select this note - held ctrl/cmd/shift extends the
   // selection so several notes can be edited together from the context menu
-  // or deleted together - and move the text-editor cursor right after it.
+  // or deleted together - and move the text-editor cursor right after it. A
+  // click that lands on one specific notehead of a chord selects just that
+  // pitch (see chordPitchIndexAtClick) so it, on its own, can be deleted or
+  // moved without taking the rest of the chord with it.
   const additive = !!(mouseEvent && (mouseEvent.ctrlKey || mouseEvent.metaKey || mouseEvent.shiftKey));
-  selectNoteRange(abcelem.startChar, abcelem.endChar, abcelem.abselem, additive);
+  const chordPitchIndex = mouseEvent
+    ? chordPitchIndexAtClick(mouseEvent.clientX, mouseEvent.clientY, abcelem.startChar, abcelem.endChar, abcelem.abselem)
+    : -1;
+  selectNoteRange(abcelem.startChar, abcelem.endChar, abcelem.abselem, additive, chordPitchIndex);
   cursorPos = abcelem.endChar;
   abcTextarea.setSelectionRange(abcelem.startChar, abcelem.endChar);
 }
@@ -1582,7 +1815,7 @@ function renderScore() {
       dragging: true,
       selectTypes: ["note", "rest"],
       clickListener: handleScoreInteraction,
-      selectionColor: "#5f8dff",
+      selectionColor: NOTE_SELECTION_COLOR,
       // Header/footer only draw in abcjs's "print" media (which also forces
       // a full page height) - only worth that trade-off in page view.
       print: viewState.mode === "page" && hasPageDecoration(currentAbc),
@@ -1926,7 +2159,13 @@ function findScoreHit(clientX, clientY) {
       // See pickElementNearPoint(): x picks the beat, real screen height
       // breaks ties between voices sounding on the same beat of a shared staff.
       const best = pickElementNearPoint(elements, pt, clientY, spacing * 3);
-      const bestDist = best ? Math.abs(best.x - pt.x) : Infinity;
+      // best.x is the token's own anchor (roughly its stem) - a notehead
+      // staggered sideways (a chord a 2nd apart draws side by side, not
+      // stacked) can sit well off from that, so a click square on that
+      // notehead could otherwise miss the "close enough to be a note" check
+      // below entirely. closestHeadSvgDistance() catches that using each
+      // actual notehead's own x (heads[i].x, same SVG space as pt.x here).
+      const bestDist = best ? Math.min(Math.abs(best.x - pt.x), closestHeadSvgDistance(best.abselem, pt.x)) : Infinity;
       if (best && best.el_type === "note" && bestDist < spacing * 1.5) {
         return { kind: "note", voiceId: best.voiceId, startChar: best.startChar, endChar: best.endChar, abselem: best.abselem };
       }
@@ -2087,12 +2326,12 @@ function removeChordNote(token) {
 // the context menu's chordPitchIndex) instead of always the highest. A note
 // that isn't actually a chord (one pitch, or none matched) has nothing to
 // shrink down to, so this deletes the whole note/rest instead - same as the
-// regular Delete key - rather than leaving an empty token behind.
+// regular Delete key.
 function removeOnePitch(token, index) {
   const p = parseNoteToken(token);
   if (!p || isRestBody(p.body)) return token;
   const pitches = tokenPitches(p.body);
-  if (pitches.length <= 1 || index < 0 || index >= pitches.length) return tokenToRestOrEmpty(token);
+  if (pitches.length <= 1 || index < 0 || index >= pitches.length) return deleteTokenText(token);
   p.body = pitchesToBody(pitches.filter((_, i) => i !== index));
   return buildNoteToken(p);
 }
@@ -2186,18 +2425,27 @@ function setTokenTuplet(token, size) {
   return buildNoteToken(p);
 }
 
-// Notes become a same-duration rest (keeps the bar's total length correct);
-// rests just vanish entirely.
-function tokenToRestOrEmpty(token) {
+// Deleting a note/rest removes it outright - it does NOT leave a same-length
+// rest behind (that would just be a different kind of "not actually gone").
+// Keeps whichever whitespace this token owned (lead and/or trail) so its
+// neighbours don't fuse together once it's gone.
+function deleteTokenText(token) {
   const p = parseNoteToken(token);
   if (!p) return "";
-  if (isRestBody(p.body)) return "";
-  const tupletMatch = p.prefix.match(/^\(\d+(?::\d+){0,2}/);
-  return `${p.lead}${tupletMatch ? tupletMatch[0] : ""}z${p.duration}${p.trail}`;
+  return p.lead + p.trail;
 }
 
 function deleteNoteSelection() {
-  applyToSelection(tokenToRestOrEmpty);
+  // Exactly one specific notehead of a chord selected (see
+  // chordPitchIndexAtClick): drop just that pitch, not the whole chord -
+  // removeOnePitch() itself falls back to a full rest if it turns out not to
+  // actually be a chord.
+  if (noteSelection.length === 1 && noteSelection[0].chordPitchIndex >= 0) {
+    const index = noteSelection[0].chordPitchIndex;
+    applyToSelection((token) => removeOnePitch(token, index));
+    return;
+  }
+  applyToSelection(deleteTokenText);
 }
 
 function tieSelectedWithNext() {
@@ -2547,6 +2795,11 @@ function buildStaffContextMenu(hit) {
         ]
       : [{ label: "Añadir nota aquí", onClick: () => insertPaletteItem(hit.insertAt, "note", "", 6) }]),
     { label: "Añadir silencio aquí", onClick: () => insertPaletteItem(hit.insertAt, "rest", "", null) },
+    {
+      label: "Añadir fin aquí",
+      title: "Barra final: marca el fin de la partitura",
+      onClick: () => setAbc(currentAbc.slice(0, hit.insertAt) + "|] " + currentAbc.slice(hit.insertAt)),
+    },
     ...(scoreClipboard ? [{ label: "Pegar aquí", onClick: () => pasteAt(hit.insertAt) }] : []),
     { separator: true },
     {
@@ -2594,25 +2847,37 @@ function buildStaffContextMenu(hit) {
 // "Altura" in the context menu can alter just that one note, the same way it
 // would for a single note, instead of always moving every note of the chord
 // together. -1 for a plain (non-chord) note, since there's nothing to pick.
-function chordPitchIndexAtClick(clientX, clientY, startChar, endChar) {
-  const result = computeDropInsertion(clientX, clientY);
-  if (!result) return -1;
+// abcjs draws a chord a 2nd apart (e.g. [CD]) with the two noteheads
+// side by side, not stacked - so picking by height alone gets the wrong one
+// half the time. abselem.heads[i].graphelem is the actual rendered <path>
+// for each notehead, with its own real position, so this checks distance to
+// each one directly instead. heads[i].pitch uses the exact same numbering as
+// abcTokenToAbsolute() (verified: C=0, D=1... across octaves), which is what
+// maps a head back to its index in tokenPitches(body) - abcjs itself always
+// renders heads in ascending-pitch order regardless of how the chord was
+// written ("[DC]" and "[CD]" render identically), so the two orderings can
+// disagree and can't just be assumed to line up index-for-index.
+function chordPitchIndexAtClick(clientX, clientY, startChar, endChar, abselem) {
   const parsed = parseNoteToken(currentAbc.slice(startChar, endChar));
   if (!parsed || isRestBody(parsed.body)) return -1;
   const pitches = tokenPitches(parsed.body);
   if (pitches.length < 2) return -1;
-  let bestIndex = 0;
+  const heads = (abselem && abselem.heads) || [];
+  if (!heads.length) return -1;
+  let bestHead = null;
   let bestDist = Infinity;
-  pitches.forEach((p, i) => {
-    const abs = abcTokenToAbsolute(p);
-    if (abs === null) return;
-    const dist = Math.abs(abs - result.pitchAbsolute);
+  heads.forEach((h) => {
+    if (!h.graphelem || typeof h.graphelem.getBoundingClientRect !== "function") return;
+    const r = h.graphelem.getBoundingClientRect();
+    const dist = Math.hypot((r.left + r.right) / 2 - clientX, (r.top + r.bottom) / 2 - clientY);
     if (dist < bestDist) {
       bestDist = dist;
-      bestIndex = i;
+      bestHead = h;
     }
   });
-  return bestIndex;
+  if (!bestHead) return -1;
+  const idx = pitches.findIndex((p) => abcTokenToAbsolute(p) === bestHead.pitch);
+  return idx;
 }
 
 scoreContainer.addEventListener("contextmenu", (e) => {
@@ -2620,10 +2885,20 @@ scoreContainer.addEventListener("contextmenu", (e) => {
   const hit = findScoreHit(e.clientX, e.clientY);
   if (!hit) return;
   if (hit.kind === "note") {
-    if (!noteSelection.some((n) => n.start === hit.startChar && n.end === hit.endChar)) {
-      selectNoteRange(hit.startChar, hit.endChar, hit.abselem, false);
+    hit.chordPitchIndex = chordPitchIndexAtClick(e.clientX, e.clientY, hit.startChar, hit.endChar, hit.abselem);
+    // Leave an existing multi-selection alone if this note is part of it
+    // (the menu should act on all of them) - but if it's the sole selected
+    // note and this click landed on a DIFFERENT pitch of that same chord,
+    // reselect so the highlight matches what "(esta nota)" is about to act on.
+    const sameToken = noteSelection.some((n) => n.start === hit.startChar && n.end === hit.endChar);
+    const needsPitchUpdate =
+      noteSelection.length === 1 &&
+      noteSelection[0].start === hit.startChar &&
+      noteSelection[0].end === hit.endChar &&
+      noteSelection[0].chordPitchIndex !== hit.chordPitchIndex;
+    if (!sameToken || needsPitchUpdate) {
+      selectNoteRange(hit.startChar, hit.endChar, hit.abselem, false, hit.chordPitchIndex);
     }
-    hit.chordPitchIndex = chordPitchIndexAtClick(e.clientX, e.clientY, hit.startChar, hit.endChar);
     showContextMenu(e.clientX, e.clientY, buildNoteContextMenu(hit));
   } else {
     showContextMenu(e.clientX, e.clientY, buildStaffContextMenu(hit));
@@ -3608,7 +3883,18 @@ function buildChips(container, values, onApply, labelFn, onDropAtPosition) {
 
 function applyValueAtPosition(field, value, dropResult) {
   const token = `[${field}:${value}] `;
-  setAbc(currentAbc.slice(0, dropResult.insertAt) + token + currentAbc.slice(dropResult.insertAt));
+  const inserted = currentAbc.slice(0, dropResult.insertAt) + token + currentAbc.slice(dropResult.insertAt);
+  if (field !== "K") {
+    setAbc(inserted);
+    return;
+  }
+  // A key signature change here would otherwise silently reinterpret every
+  // note after it under the new key - the same written "F" might mean F# one
+  // side of it and F natural the other. Rewrite them so the key changes the
+  // spelling/engraving from here on, never the actual pitch that sounds.
+  const { headers } = parseAbcHeaders(currentAbc);
+  const zoneStart = dropResult.insertAt + token.length;
+  setAbc(preserveSoundAcrossKeyChange(inserted, zoneStart, headers.K, value));
 }
 
 function applyQuickValue(field, value) {
@@ -3632,6 +3918,7 @@ initChips();
 barlineBtn.addEventListener("click", () => insertAtCursor("| "));
 repeatStartBtn.addEventListener("click", () => insertAtCursor("|: "));
 repeatEndBtn.addEventListener("click", () => insertAtCursor(":| "));
+document.getElementById("final-barline-btn").addEventListener("click", () => insertAtCursor("|] "));
 
 // ===================== Compose (initial generation) =====================
 
@@ -3904,7 +4191,7 @@ async function showVersionsMenu() {
     setStatus("Esta partitura todavía no tiene versiones anteriores guardadas.");
     return;
   }
-  const rect = scoreMenuBtn.getBoundingClientRect();
+  const rect = appMenuBtn.getBoundingClientRect();
   showContextMenu(
     rect.left,
     rect.bottom + 4,
@@ -3974,7 +4261,7 @@ function scheduleAutosave() {
 
 function setAutosave(on) {
   autosaveOn = on;
-  scoreMenuBtn.classList.toggle("is-on", on);
+  appMenuBtn.classList.toggle("is-on", on);
   saveStoredState("partis.autosave", { on });
   if (on) {
     if (!currentScoreId) {
@@ -3990,36 +4277,61 @@ function setAutosave(on) {
 
 setAutosave(!!loadStoredState("partis.autosave", { on: false }).on);
 
-// ===================== Score menu (Guardar/versiones/exportar) =====================
+// ===================== App menu (nuevo/archivo/guardar/perfil...) =========
 //
-// One dropdown instead of a row of buttons - Guardar, versiones and export
-// are all occasional actions, not something reached for every few seconds
-// like the note palette, so they don't need to sit spelled out in the topbar.
+// One dropdown for everything that isn't reached for every few seconds like
+// the note palette is - starting a piece, opening/saving one, versions,
+// export, the account. Always available (it isn't tucked inside
+// .score-actions, which only shows once a score is open), but the
+// score-specific actions only show once there's actually a score to act on.
 
-function buildScoreMenu() {
+function buildAppMenu() {
+  const hasScore = !!currentAbc.trim();
   return [
-    { label: "Guardar", onClick: () => saveScore({ confirmOverwrite: true }) },
-    { label: "Nueva versión", onClick: createNewVersion },
-    { label: "Versiones", onClick: showVersionsMenu },
-    { separator: true },
     {
-      label: autosaveOn ? "Autoguardado: activado ✓" : "Autoguardado: desactivado",
-      onClick: () => setAutosave(!autosaveOn),
+      label: "Nuevo",
+      onClick: () => {
+        openPanel("panel-compose");
+        closePanel("panel-library");
+      },
     },
+    {
+      label: "Archivo (partituras guardadas)",
+      onClick: () => {
+        openPanel("panel-library");
+        loadScoreLibrary();
+      },
+    },
+    ...(hasScore
+      ? [
+          { separator: true },
+          { label: "Guardar", onClick: () => saveScore({ confirmOverwrite: true }) },
+          { label: "Nueva versión", onClick: createNewVersion },
+          { label: "Versiones", onClick: showVersionsMenu },
+          { separator: true },
+          {
+            label: autosaveOn ? "Autoguardado: activado ✓" : "Autoguardado: desactivado",
+            onClick: () => setAutosave(!autosaveOn),
+          },
+          { separator: true },
+          { label: "Descargar MusicXML", onClick: downloadMusicXml },
+          { label: "Descargar MIDI", onClick: downloadMidi },
+        ]
+      : []),
     { separator: true },
-    { label: "Descargar MusicXML", onClick: downloadMusicXml },
-    { label: "Descargar MIDI", onClick: downloadMidi },
+    { label: "Perfil", onClick: showProfileInfo },
+    { label: "Cerrar sesión", onClick: signOut },
   ];
 }
 
-scoreMenuBtn.addEventListener("click", (e) => {
+appMenuBtn.addEventListener("click", (e) => {
   // Same reasoning as the submenu buttons inside showContextMenu(): this
   // click is still bubbling when the menu opens, and would otherwise reach
   // the document-level "click outside closes the menu" listener right after
   // and immediately close what was just opened.
   e.stopPropagation();
-  const rect = scoreMenuBtn.getBoundingClientRect();
-  showContextMenu(rect.left, rect.bottom + 4, buildScoreMenu());
+  const rect = appMenuBtn.getBoundingClientRect();
+  showContextMenu(rect.left, rect.bottom + 4, buildAppMenu());
 });
 
 // ===================== Chat with AI =====================
@@ -4093,7 +4405,6 @@ const ROLE_LABELS = { app_admin: "administrador de la app", director: "director"
 const authGateEl = document.getElementById("auth-gate");
 const authIndicatorEl = document.getElementById("auth-indicator");
 const authUserLabelEl = document.getElementById("auth-user-label");
-const logoutBtn = document.getElementById("logout-btn");
 const loginForm = document.getElementById("auth-login-form");
 const loginStatusEl = document.getElementById("login-status");
 const orgPickerEl = document.getElementById("auth-org-picker");
@@ -4176,8 +4487,22 @@ function signOut() {
   showAuthGate();
 }
 
-logoutBtn.addEventListener("click", signOut);
 document.getElementById("admin-logout-btn").addEventListener("click", signOut);
+
+// A quick read-only look at who's signed in - organization name included,
+// since GET /org/me works for any role with a tenant (director/admin/
+// musico alike), not just the two that get their own management panel.
+async function showProfileInfo() {
+  if (!authState) return;
+  const lines = [`Usuario: ${authState.username}`, `Rol: ${ROLE_LABELS[authState.role] || authState.role}`];
+  try {
+    const org = await parseAuthResponse(await authFetch("/api/auth/org/me"));
+    lines.push(`Organización: ${org.name}`);
+  } catch {
+    /* app_admin has no organization - nothing to add */
+  }
+  window.alert(lines.join("\n"));
+}
 
 // Attaches the bearer token to a fetch call, and signs the user out if the
 // backend rejects it - the backend and the auth service share one JWT

@@ -332,7 +332,8 @@ select:focus {
   display: none !important;
 }
 
-.score-actions button {
+.score-actions button,
+#app-menu-btn {
   background: var(--surface);
   border: 1px solid var(--border);
   padding: 6px 11px;
@@ -342,13 +343,15 @@ select:focus {
   transition: all 0.15s;
 }
 
-.score-actions button:hover {
+.score-actions button:hover,
+#app-menu-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
 
 /* Autoguardado, while active - same treatment as the metronome toggle. */
-.score-actions button.is-on {
+.score-actions button.is-on,
+#app-menu-btn.is-on {
   background: var(--accent-soft);
   border-color: var(--accent-ring);
   color: var(--accent);

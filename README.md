@@ -35,7 +35,7 @@ Composición musical asistida por IA (DeepSeek), con renderizado de partitura en
 **Notas y figuras.** El panel **Notas** (♪) tiene la paleta de figuras (de cuadrada a semifusa) y de silencios: se arrastran directamente al pentagrama y sueltan ahí (la altura la decide dónde se suelten), o se pulsan una vez para **armarlas** - el botón queda resaltado - y entonces cada clic sobre el pentagrama coloca una nota en ese punto, sin tener que volver a coger el botón cada vez; un segundo clic sobre el mismo botón, elegir otra figura o `Esc` lo desarma. Junto a ellas: alteraciones (incluidos doble sostenido y doble bemol), **puntillo y doble puntillo**, y **grupos especiales** (dosillo, tresillo, cuatrillo, cincillo, seisillo, septillo y nonillo). El puntillo y el grupo especial armado se aplican a lo que coloques a continuación; sobre notas ya seleccionadas, el botón **Aplicar a selección** (junto al selector de grupo especial) o el menú contextual → *Grupo especial* las convierte en ese grupo, y **Quitar grupo** lo deshace.
 
 **Acordes (notas dobles).** Tres formas:
-- Haz clic justo encima o debajo de una nota ya escrita: se le añade esa altura como nota de acorde (misma duración que la nota, sin necesidad de tener nada armado ni marcar ninguna casilla); si la alteración del panel Notas tiene algo elegido, se aplica a la nota añadida igual que a una nota nueva. Un clic sobre una altura que el acorde ya tiene no la duplica. Después, para alterar solo esa nota del acorde (y no las demás), clic derecho justo sobre ella → *Altura* → *Subir/Bajar semitono (esta nota)*.
+- Haz clic justo encima o debajo de una nota ya escrita: se le añade esa altura como nota de acorde (misma duración que la nota, sin necesidad de tener nada armado ni marcar ninguna casilla); si la alteración del panel Notas tiene algo elegido, se aplica a la nota añadida igual que a una nota nueva. Un clic sobre una altura que el acorde ya tiene no la duplica. Después, cada nota del acorde se trata como una nota independiente (salvo la figura/duración, que es una sola para todo el acorde): clic derecho justo sobre ella → *Altura* → alterar, subir/bajar un tono o una octava (solo esa nota, las demás no se mueven), o *Acorde* → *Borrar esta nota* para quitar solo esa - si el acorde se queda con una única nota, deja de ser acorde.
 - Activa **Apilar en acorde** en el panel de notas y suelta una figura encima de una nota existente: se le añade esa altura en vez de escribir una nota nueva al lado.
 - Con notas seleccionadas, los botones **+3ª / +5ª / +8ª / −3ª / −5ª / −8ª** añaden esa altura, **Unir** funde varias notas seleccionadas en un solo acorde y **Quitar** elimina la nota más aguda. Lo mismo está en el menú contextual → *Acorde*.
 
@@ -118,7 +118,11 @@ El icono **Archivo** del lateral abre la lista de partituras guardadas por cualq
 
 **Deshacer / rehacer.** Los botones ↶/↷ de la barra superior (o `Ctrl+Z` / `Ctrl+Y`, también `Ctrl+Shift+Z`) recorren el historial de cambios de la partitura abierta - cualquier edición cuenta: notas, acordes, letra, cabecera, editar el ABC a mano... Escribir directamente en el panel **ABC** agrupa las pulsaciones seguidas en un solo paso de deshacer en vez de una por tecla. El historial se reinicia al empezar una pieza nueva, abrir otra partitura guardada o cargar una versión anterior (ver abajo) - deshacer nunca cruza de una pieza a otra.
 
-**Versiones.** Cada vez que "Guardar" sobrescribe una partitura ya guardada, el contenido anterior no se pierde: el backend lo archiva automáticamente antes de sobrescribir (si el contenido no cambió, no archiva nada). El botón **Versiones** de la barra superior lista esas copias con fecha y quién guardó cada una; abrir una la carga en el editor - igual que abrir una partitura del archivo, sustituyendo el trabajo actual - sin sobrescribir nada por sí sola: hace falta pulsar Guardar para conservarla (lo que a su vez archiva lo que hubiera antes, así que nunca se pierde nada por recuperar una versión antigua).
+**Versiones.** Cada vez que "Guardar" sobrescribe una partitura ya guardada, el contenido anterior no se pierde: el backend lo archiva automáticamente antes de sobrescribir (si el contenido no cambió, no archiva nada), y "Guardar" lo avisa con un diálogo de confirmación antes de sobrescribir. El botón **Versiones** de la barra superior lista esas copias con fecha y quién guardó cada una; abrir una la carga en el editor - igual que abrir una partitura del archivo, sustituyendo el trabajo actual - sin sobrescribir nada por sí sola: hace falta pulsar Guardar para conservarla (lo que a su vez archiva lo que hubiera antes, así que nunca se pierde nada por recuperar una versión antigua).
+
+El botón **Nueva versión** es la otra vía, para el caso contrario: archiva lo que haya ahora mismo en el editor como una versión propia *sin* tocar la partitura ya guardada - útil para dejar un punto de control de un estado intermedio sin comprometerlo como la copia "oficial".
+
+**Autoguardado.** El botón homónimo (se recuerda por navegador, como el metrónomo) hace que, 15 segundos después de la última edición, se repita el mismo guardado que haría "Guardar" - mismo título (el `T:` del ABC), mismo `score_id` - pero en silencio: sin preguntar el título ni interrumpir con el diálogo de confirmación. Solo actúa si la partitura ya se guardó una vez a mano y si de verdad hay cambios desde el último guardado (propio o automático).
 
 Vive en `backend/` (tabla `scores.scores`, tenant-scoped igual que todo lo demás) en vez de en `auth/`, ya que es dominio "partituras" no "identidad" - el `backend` ya tenía la lógica de ABC/MusicXML y ahora también su propia conexión a Postgres (comparte el mismo `DATABASE_URL` que `auth`, cada uno con sus propias tablas).
 
@@ -142,4 +146,9 @@ curl http://localhost:3000/api/scores/<id>/versions -H "Authorization: Bearer <t
 
 # Contenido completo de una versión concreta
 curl http://localhost:3000/api/scores/<id>/versions/<version_id> -H "Authorization: Bearer <token>"
+
+# Crear una versión directamente (sin tocar la partitura guardada)
+curl -X POST http://localhost:3000/api/scores/<id>/versions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <token>" \
+  -d '{"title":"Vals de Otoño","abc":"X:1\nT:Vals de Otoño\nK:C\nC2 D2 E2 F2 |"}'
 ```

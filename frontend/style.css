@@ -347,6 +347,13 @@ select:focus {
   color: var(--accent);
 }
 
+/* Autoguardado, while active - same treatment as the metronome toggle. */
+.score-actions button.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+  color: var(--accent);
+}
+
 /* ===================== Workspace / rail ===================== */
 
 .workspace {

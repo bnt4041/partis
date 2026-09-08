@@ -52,6 +52,11 @@ class SaveScoreRequest(BaseModel):
     score_id: Optional[str] = None  # set => overwrite that score instead of creating a new one
 
 
+class CreateVersionRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    abc: str = Field(..., min_length=1, max_length=20000)
+
+
 class ScoreSummary(BaseModel):
     id: str
     title: str

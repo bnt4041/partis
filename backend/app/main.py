@@ -31,6 +31,7 @@ from .schemas import (
     ComposeResponse,
     RenderRequest,
     RenderResponse,
+    CreateVersionRequest,
     SaveScoreRequest,
     ScoreDetail,
     ScoreSummary,
@@ -240,6 +241,23 @@ async def list_score_versions(score_id: str, claims: dict = Depends(require_auth
     tenant_id = _require_tenant(claims)
     try:
         return [ScoreVersionSummary(**v) for v in scores_service.list_score_versions(tenant_id, score_id)]
+    except scores_service.ScoreNotFound:
+        raise HTTPException(status_code=404, detail="Partitura no encontrada.")
+
+
+@app.post("/api/scores/{score_id}/versions", response_model=ScoreVersionDetail)
+async def create_score_version(score_id: str, req: CreateVersionRequest, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    try:
+        version = scores_service.create_score_version(
+            tenant_id=tenant_id,
+            score_id=score_id,
+            title=req.title.strip() or "Sin título",
+            abc=req.abc,
+            created_by=claims["sub"],
+            created_by_username=claims.get("username", ""),
+        )
+        return ScoreVersionDetail(**version)
     except scores_service.ScoreNotFound:
         raise HTTPException(status_code=404, detail="Partitura no encontrada.")
 

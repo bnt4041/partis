@@ -159,3 +159,32 @@ def get_score_version(tenant_id: str, score_id: str, version_id: str) -> dict:
         "created_by_username": row[4],
         "created_at": row[5].isoformat(),
     }
+
+
+# Explicit checkpoint (the "Nueva versión" button): archives whatever's
+# currently in the editor as a version WITHOUT touching scores.scores itself -
+# unlike save_score()'s automatic archiving, which only fires as a side
+# effect of overwriting the "official" saved copy. Useful to keep a snapshot
+# of a work-in-progress state without committing to it as the main copy.
+def create_score_version(
+    tenant_id: str, score_id: str, title: str, abc: str, created_by: str, created_by_username: str
+) -> dict:
+    now = datetime.now(timezone.utc)
+    with pool.connection() as conn:
+        _require_owned_score(conn, tenant_id, score_id)
+        version_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO scores.score_versions (id, score_id, title, abc, created_by, created_by_username, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (version_id, score_id, title, abc, created_by, created_by_username, now),
+        )
+    return {
+        "id": version_id,
+        "score_id": score_id,
+        "title": title,
+        "abc": abc,
+        "created_by_username": created_by_username,
+        "created_at": now.isoformat(),
+    }

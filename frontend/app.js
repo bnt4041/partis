@@ -473,14 +473,15 @@ function estimateMeasureCount() {
 
 function computeStaffWidth() {
   if (viewState.mode === "page") return PAGE_STAFF_WIDTH;
-  // Size purely by measure count, never by the stage's own width: abcjs
-  // justifies notes to fill whatever width it's given, so stretching a
-  // short piece to the viewport turns a couple of bars into a barely
-  // readable smear. A short piece just ends up narrower than the stage
-  // (fine, it's left-aligned); a long one overflows and the stage scrolls.
+  // The ribbon always fills at least the whole width of the stage (the
+  // <main>) - a short piece stretches out to it instead of sitting narrow in
+  // a lot of empty space. It can still grow past that for a longer piece
+  // (abcjs justifies notes to fill whatever width it's given, so it never
+  // wraps to a second line in this mode) - the stage just scrolls sideways
+  // to it, which is the whole point of "Seguida" as one continuous ribbon.
   const available = Math.max(320, stageEl.clientWidth - 120) / viewState.zoom;
   const needed = Math.max(1, estimateMeasureCount()) * CONTINUOUS_PX_PER_MEASURE;
-  return Math.max(Math.min(available, 480), needed);
+  return Math.max(available, needed);
 }
 
 function setupWorkspaceControls() {
@@ -1961,29 +1962,32 @@ function applyToSelection(transformToken) {
 //
 // A "note token" - the slice of ABC between an element's startChar/endChar -
 // carries much more than the pitch: leading whitespace (the first note of a
-// bar arrives as " C2"), a tuplet marker, grace notes, chord symbols,
-// decorations, a chord in brackets, a duration and a tie. Everything that
-// edits a note goes through this parser, so no transform silently no-ops on a
-// note that happens to be the first of its measure or part of a chord.
+// bar arrives as " C2"), a tuplet marker, a slur start/end ("(" / ")" - a
+// slur across a whole tuplet writes both on the SAME note, e.g. "((3^e "),
+// grace notes, chord symbols, decorations, a chord in brackets, a duration
+// and a tie. Everything that edits a note goes through this parser, so no
+// transform silently no-ops on a note that happens to start/end a slur, be
+// the first of its measure, or be part of a chord.
 const NOTE_TOKEN_RE = new RegExp(
   "^(\\s*)" + // 1 leading whitespace
-    "((?:\\(\\d+(?::\\d+){0,2})?(?:\\{[^}]*\\})?(?:(?:\"[^\"]*\"|![^!]*!|[.~HLMOPSTuv])\\s*)*)" + // 2 tuplet/grace/chord-symbol/decorations
+    "((?:(?:\\(\\d+(?::\\d+){0,2})|\\()*(?:\\{[^}]*\\})?(?:(?:\"[^\"]*\"|![^!]*!|[.~HLMOPSTuv])\\s*)*)" + // 2 tuplet marker(s)/slur start(s) in any order, grace/chord-symbol/decorations
     "(\\[[^\\]]*\\]|(?:\\^{1,2}|_{1,2}|=)?[A-Ga-gxXzZ][,']*)" + // 3 chord or single pitch
     "((?:\\d+)?(?:\\/+\\d*)?)" + // 4 duration
     "(-?)" + // 5 tie
-    "(\\s*)$" // 6 trailing whitespace
+    "(\\)*)" + // 6 slur end(s)
+    "(\\s*)$" // 7 trailing whitespace
 );
 
 function parseNoteToken(token) {
   const m = token.match(NOTE_TOKEN_RE);
   if (!m) return null;
-  const [, lead, prefix, body, duration, tie, trail] = m;
+  const [, lead, prefix, body, duration, tie, slurEnd, trail] = m;
   if (/^\[[A-Za-z]:/.test(body)) return null; // an inline field like [K:C], not a note
-  return { lead, prefix, body, duration, tie, trail };
+  return { lead, prefix, body, duration, tie, slurEnd, trail };
 }
 
 function buildNoteToken(p) {
-  return `${p.lead}${p.prefix}${p.body}${p.duration}${p.tie}${p.trail}`;
+  return `${p.lead}${p.prefix}${p.body}${p.duration}${p.tie}${p.slurEnd || ""}${p.trail}`;
 }
 
 function isRestBody(body) {
@@ -2079,6 +2083,20 @@ function removeChordNote(token) {
   return buildNoteToken(p);
 }
 
+// Remove just ONE pitch of a chord (by index, from addChordToneAtClick's or
+// the context menu's chordPitchIndex) instead of always the highest. A note
+// that isn't actually a chord (one pitch, or none matched) has nothing to
+// shrink down to, so this deletes the whole note/rest instead - same as the
+// regular Delete key - rather than leaving an empty token behind.
+function removeOnePitch(token, index) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  const pitches = tokenPitches(p.body);
+  if (pitches.length <= 1 || index < 0 || index >= pitches.length) return tokenToRestOrEmpty(token);
+  p.body = pitchesToBody(pitches.filter((_, i) => i !== index));
+  return buildNoteToken(p);
+}
+
 // ---------- Accidentals, decorations, octaves ----------
 
 const ACCIDENTAL_ORDER = ["__", "_", "", "^", "^^"];
@@ -2113,6 +2131,19 @@ function shiftOnePitchAccidental(token, index, direction) {
 
 function shiftTokenPitch(token, steps) {
   return mapTokenPitches(token, (pitch) => shiftAbcNoteToken(pitch, steps));
+}
+
+// Same as shiftTokenPitch, but for just ONE pitch of a chord (a diatonic
+// step or a full octave, not just a semitone - see shiftOnePitchAccidental
+// for that one) - moving one note of a chord independently of the rest.
+function shiftOnePitchToken(token, index, steps) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  const pitches = tokenPitches(p.body);
+  if (index < 0 || index >= pitches.length) return token;
+  pitches[index] = shiftAbcNoteToken(pitches[index], steps);
+  p.body = pitchesToBody(pitches);
+  return buildNoteToken(p);
 }
 
 // Decorations (!accent!, !p!, !fermata!...) go immediately before the note, so
@@ -2410,6 +2441,11 @@ function buildNoteContextMenu(hit) {
           onClick: () => applyToSelection((token) => addChordNote(token, i.steps)),
         })),
         { separator: true },
+        // Right-clicked one specific note of a chord: offer to drop just
+        // that one, ahead of the generic "highest note" shortcut below.
+        ...(!multi && hit.chordPitchIndex >= 0
+          ? [{ label: "Borrar esta nota (del acorde)", onClick: () => applyToSelection((token) => removeOnePitch(token, hit.chordPitchIndex)) }]
+          : []),
         { label: "Quitar la nota más aguda", onClick: () => applyToSelection(removeChordNote) },
         ...(multi ? [{ label: `Unir las ${count} notas en un acorde`, onClick: mergeSelectionIntoChord }] : []),
       ],
@@ -2436,6 +2472,10 @@ function buildNoteContextMenu(hit) {
           ? [
               { label: "Subir semitono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchAccidental(token, hit.chordPitchIndex, 1)) },
               { label: "Bajar semitono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchAccidental(token, hit.chordPitchIndex, -1)) },
+              { label: "Subir un tono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchToken(token, hit.chordPitchIndex, 1)) },
+              { label: "Bajar un tono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchToken(token, hit.chordPitchIndex, -1)) },
+              { label: "Subir una octava (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchToken(token, hit.chordPitchIndex, 7)) },
+              { label: "Bajar una octava (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchToken(token, hit.chordPitchIndex, -7)) },
               { separator: true },
             ]
           : []),
@@ -3413,6 +3453,7 @@ function setAbc(newAbc) {
   updateToolbarEnabled();
   syncDrumGroup();
   updateClipboardButtons();
+  scheduleAutosave();
 }
 
 // ===================== Note editor toolbar =====================
@@ -3433,6 +3474,7 @@ abcTextarea.addEventListener("input", () => {
   syncPropertiesPanel();
   updateScoreTitleFromAbc();
   updateToolbarEnabled();
+  scheduleAutosave();
 });
 
 function insertAtCursor(text) {
@@ -3797,16 +3839,36 @@ async function loadScoreLibrary() {
 document.querySelector('[data-panel="panel-library"]').addEventListener("click", loadScoreLibrary);
 
 document.getElementById("save-score-btn").addEventListener("click", async () => {
-  if (!currentAbc.trim()) return;
+  await saveScore({ confirmOverwrite: true });
+});
+
+// Shared by the "Guardar" button and autosave. `confirmOverwrite` asks first
+// when this would overwrite an already-saved piece (autosave skips that -
+// asking on every tick would defeat the point) - either way, the previous
+// content isn't lost: the backend archives it as a version before
+// overwriting (see scores_service.save_score). `silent` skips the title
+// prompt and the "Guardada..." status message, for autosave again.
+async function saveScore({ confirmOverwrite = false, silent = false } = {}) {
+  if (!currentAbc.trim()) return false;
   const { headers } = parseAbcHeaders(currentAbc);
   const proposed = (headers.T || "").trim() || "Sin título";
-  const title = window.prompt("Título de la partitura:", proposed);
-  if (title === null) return; // cancelled
-  const finalTitle = title.trim() || "Sin título";
+  let finalTitle = proposed;
 
-  // Keep the ABC's own T: header in sync with whatever was confirmed here,
-  // so the title shown on the score matches what's shown in the library.
-  if (finalTitle !== proposed) setAbc(replaceHeaderLine(currentAbc, "T", finalTitle));
+  if (!silent) {
+    const title = window.prompt("Título de la partitura:", proposed);
+    if (title === null) return false; // cancelled
+    finalTitle = title.trim() || "Sin título";
+    // Keep the ABC's own T: header in sync with whatever was confirmed here,
+    // so the title shown on the score matches what's shown in the library.
+    if (finalTitle !== proposed) setAbc(replaceHeaderLine(currentAbc, "T", finalTitle));
+  }
+
+  if (confirmOverwrite && currentScoreId) {
+    const ok = window.confirm(
+      `Vas a sobrescribir "${finalTitle}". Se guardará automáticamente una versión con el contenido anterior antes de sobrescribir. ¿Continuar?`
+    );
+    if (!ok) return false;
+  }
 
   try {
     const data = await parseAuthResponse(
@@ -3817,11 +3879,14 @@ document.getElementById("save-score-btn").addEventListener("click", async () => 
       })
     );
     currentScoreId = data.id;
-    setStatus(`Guardada "${data.title}".`);
+    lastAutosavedAbc = currentAbc;
+    if (!silent) setStatus(`Guardada "${data.title}".`);
+    return true;
   } catch (err) {
-    setStatus(`Error al guardar: ${err.message}`, true);
+    if (!silent) setStatus(`Error al guardar: ${err.message}`, true);
+    return false;
   }
-});
+}
 
 // Every time "Guardar" overwrites an already-saved score, the backend
 // archives what was there before (see scores_service.save_score) - this is
@@ -3862,6 +3927,77 @@ versionsBtn.addEventListener("click", async () => {
     }))
   );
 });
+
+// Checkpoint whatever's in the editor right now as a version of its own,
+// without touching the "official" saved copy (unlike Guardar, which always
+// updates it) - so you can keep iterating without losing this exact state.
+document.getElementById("new-version-btn").addEventListener("click", async () => {
+  if (!currentScoreId) {
+    setStatus("Guarda la partitura al menos una vez para poder crear versiones.", true);
+    return;
+  }
+  if (!currentAbc.trim()) return;
+  const { headers } = parseAbcHeaders(currentAbc);
+  const title = (headers.T || "").trim() || "Sin título";
+  try {
+    await parseAuthResponse(
+      await authFetch(`/api/scores/${currentScoreId}/versions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, abc: currentAbc }),
+      })
+    );
+    setStatus("Nueva versión guardada, sin tocar la partitura ya guardada.");
+  } catch (err) {
+    setStatus(`Error al crear la versión: ${err.message}`, true);
+  }
+});
+
+// ===================== Autosave =====================
+//
+// Off by default, remembered per browser like the metronome. While on, it
+// silently re-runs the same save Guardar would (title from the ABC's own T:,
+// same score_id) shortly after an edit settles down - never on every single
+// keystroke, and never while there's nothing to save yet (before the first
+// manual Guardar) or nothing has actually changed since the last save.
+
+const AUTOSAVE_DEBOUNCE_MS = 15000;
+let autosaveOn = false;
+let autosaveTimer = null;
+let lastAutosavedAbc = null;
+const autosaveBtn = document.getElementById("autosave-btn");
+
+function scheduleAutosave() {
+  if (!autosaveOn || !currentScoreId) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(async () => {
+    if (!autosaveOn || !currentScoreId || currentAbc === lastAutosavedAbc) return;
+    const ok = await saveScore({ confirmOverwrite: false, silent: true });
+    if (ok) flashPlaybackStatus("Autoguardado.", 1200);
+  }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+function setAutosave(on) {
+  autosaveOn = on;
+  autosaveBtn.classList.toggle("is-on", on);
+  autosaveBtn.title = on
+    ? "Autoguardado activado - pulsa para desactivar"
+    : "Autoguardado: guarda los cambios automáticamente cada poco";
+  saveStoredState("partis.autosave", { on });
+  if (on) {
+    if (!currentScoreId) {
+      setStatus("Autoguardado activado - se guardará en cuanto guardes esta partitura por primera vez.");
+    } else {
+      lastAutosavedAbc = null; // an edit right after turning it on should still count
+      scheduleAutosave();
+    }
+  } else {
+    clearTimeout(autosaveTimer);
+  }
+}
+
+autosaveBtn.addEventListener("click", () => setAutosave(!autosaveOn));
+setAutosave(!!loadStoredState("partis.autosave", { on: false }).on);
 
 // ===================== Chat with AI =====================
 

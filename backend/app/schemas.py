@@ -62,3 +62,15 @@ class ScoreSummary(BaseModel):
 
 class ScoreDetail(ScoreSummary):
     abc: str
+
+
+class ScoreVersionSummary(BaseModel):
+    id: str
+    score_id: str
+    title: str
+    created_by_username: Optional[str]
+    created_at: str
+
+
+class ScoreVersionDetail(ScoreVersionSummary):
+    abc: str

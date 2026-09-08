@@ -435,6 +435,9 @@ select:focus {
   box-shadow: var(--sheet-shadow);
   transition: width 0.18s ease, padding 0.18s ease, box-shadow 0.25s ease;
   flex: none;
+  /* The per-staff mute buttons are absolutely positioned against this box
+     (not against #score-container, which abcjs gives overflow:hidden). */
+  position: relative;
 }
 
 .stage.mode-page .sheet {
@@ -472,6 +475,59 @@ select:focus {
   outline-offset: 8px;
   border-radius: 4px;
   transition: outline-color 0.15s;
+}
+
+/* Mute toggle drawn at the start of each staff of the first system. */
+.staff-mute-btn {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s, border-color 0.15s;
+  z-index: 5;
+}
+
+.sheet:hover .staff-mute-btn,
+.staff-mute-btn.is-muted {
+  opacity: 1;
+}
+
+.staff-mute-btn.is-muted {
+  border-color: var(--danger);
+}
+
+.staff-mute-btn:hover {
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+#score-container.is-armed-cursor {
+  cursor: crosshair;
+}
+
+/* Rubber-band multi-selection rectangle. */
+.select-band {
+  position: fixed;
+  border: 1px solid var(--accent);
+  background: var(--accent-ring, rgba(95, 141, 255, 0.18));
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 60;
+}
+
+.select-band[hidden] {
+  display: none;
 }
 
 .drop-target.drop-hover {
@@ -515,6 +571,12 @@ select:focus {
 
 .transport[hidden] {
   display: none;
+}
+
+.transport-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 #audio-controls {
@@ -899,6 +961,21 @@ select:focus {
   flex-wrap: wrap;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+  margin: 0;
+}
+
+.check-row input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
 .btn-row button {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -929,6 +1006,31 @@ select:focus {
 
 .palette-chip:active {
   cursor: grabbing;
+}
+
+/* Armed via a plain click (see setArmedPalette in app.js): stays highlighted
+   until the next click on the score places it, the chip is clicked again, or
+   Escape cancels it. */
+.palette-chip.is-armed {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* The drum buttons are named, not glyphs, so they don't want the oversized
+   music-symbol sizing the rest of the palette uses. */
+.drum-chip {
+  font-size: 12px !important;
+  min-width: 0;
+  padding: 6px 10px !important;
+}
+
+/* A second toolbar row (chords, dynamics, clipboard) under the first one. */
+.note-toolbar + .note-toolbar {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
 }
 
 .tuplet-hint {
@@ -1081,6 +1183,8 @@ select:focus {
   padding: 5px;
   min-width: 210px;
   box-shadow: var(--shadow);
+  /* The note menu is long; max-height is set inline from the click position. */
+  overflow-y: auto;
 }
 
 .context-menu[hidden] {

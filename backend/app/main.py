@@ -34,6 +34,8 @@ from .schemas import (
     SaveScoreRequest,
     ScoreDetail,
     ScoreSummary,
+    ScoreVersionDetail,
+    ScoreVersionSummary,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -231,3 +233,23 @@ async def delete_score(score_id: str, claims: dict = Depends(require_auth)):
         scores_service.delete_score(tenant_id, score_id)
     except scores_service.ScoreNotFound:
         raise HTTPException(status_code=404, detail="Partitura no encontrada.")
+
+
+@app.get("/api/scores/{score_id}/versions", response_model=list[ScoreVersionSummary])
+async def list_score_versions(score_id: str, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    try:
+        return [ScoreVersionSummary(**v) for v in scores_service.list_score_versions(tenant_id, score_id)]
+    except scores_service.ScoreNotFound:
+        raise HTTPException(status_code=404, detail="Partitura no encontrada.")
+
+
+@app.get("/api/scores/{score_id}/versions/{version_id}", response_model=ScoreVersionDetail)
+async def get_score_version(score_id: str, version_id: str, claims: dict = Depends(require_auth)):
+    tenant_id = _require_tenant(claims)
+    try:
+        return ScoreVersionDetail(**scores_service.get_score_version(tenant_id, score_id, version_id))
+    except scores_service.ScoreNotFound:
+        raise HTTPException(status_code=404, detail="Partitura no encontrada.")
+    except scores_service.VersionNotFound:
+        raise HTTPException(status_code=404, detail="Versión no encontrada.")

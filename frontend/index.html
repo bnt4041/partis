@@ -48,6 +48,9 @@
       <h1 id="score-title" class="score-title">Sin partitura</h1>
       <button type="button" id="theme-toggle" class="icon-btn" title="Cambiar entre tema claro y oscuro">☾</button>
       <div class="score-actions" id="score-actions" hidden>
+        <button type="button" id="undo-btn" class="icon-btn" title="Deshacer (Ctrl+Z)" disabled>↶</button>
+        <button type="button" id="redo-btn" class="icon-btn" title="Rehacer (Ctrl+Y)" disabled>↷</button>
+        <button type="button" id="versions-btn" title="Ver versiones anteriores">Versiones</button>
         <button type="button" id="save-score-btn">Guardar</button>
         <button type="button" id="download-musicxml">MusicXML</button>
         <button type="button" id="download-midi">MIDI</button>
@@ -103,6 +106,7 @@
     <button type="button" id="metronome-toggle" class="metronome-btn" title="Metrónomo: marca el pulso al reproducir">
       <span class="metronome-icon">𝅘𝅥</span><span>Metrónomo</span>
     </button>
+    <span class="transport-hint">Espacio = reproducir / pausar</span>
     <p id="playback-status" class="status"></p>
   </footer>
 
@@ -167,7 +171,16 @@
       <button type="button" class="panel-close" title="Cerrar">✕</button>
     </header>
     <div class="panel-body">
-      <p class="panel-hint">Cambia los valores, o arrastra uno sobre la partitura para aplicarlo.</p>
+      <label for="prop-title">Título</label>
+      <input id="prop-title" type="text" placeholder="Título de la partitura" />
+
+      <label for="prop-header">Encabezado <span class="label-hint">(solo en vista Hoja)</span></label>
+      <input id="prop-header" type="text" placeholder="Ej: Coro Santa Cecilia" />
+
+      <label for="prop-footer">Pie de página <span class="label-hint">(solo en vista Hoja)</span></label>
+      <input id="prop-footer" type="text" placeholder="Ej: © 2026" />
+
+      <p class="panel-hint" style="margin-top: 16px">Cambia los valores, o arrastra uno sobre la partitura para aplicarlo.</p>
       <div class="options-grid">
         <div>
           <label for="prop-key">Tonalidad</label>
@@ -196,9 +209,12 @@
       <button type="button" class="panel-close" title="Cerrar">✕</button>
     </header>
     <div class="panel-body">
-      <p class="panel-hint">Arrastra ⠿ para reordenar. Clic derecho para más opciones.</p>
+      <p class="panel-hint">Arrastra ⠿ para reordenar. Clic derecho para más opciones. El altavoz al inicio de cada pentagrama lo silencia.</p>
       <div id="voice-list" class="voice-list"></div>
-      <button type="button" id="add-voice-btn" class="secondary-btn">+ Añadir pentagrama</button>
+      <div class="btn-pair">
+        <button type="button" id="add-voice-btn" class="secondary-btn">+ Pentagrama</button>
+        <button type="button" id="add-drum-voice-btn" class="secondary-btn">+ Percusión</button>
+      </div>
     </div>
   </section>
 
@@ -219,6 +235,7 @@
             <button type="button" class="palette-chip" data-kind="note" data-duration="" title="Corchea">♪</button>
             <button type="button" class="palette-chip" data-kind="note" data-duration="/2" title="Semicorchea">♬</button>
             <button type="button" class="palette-chip" data-kind="note" data-duration="/4" title="Fusa">𝅘𝅥𝅰</button>
+            <button type="button" class="palette-chip" data-kind="note" data-duration="/8" title="Semifusa">𝅘𝅥𝅱</button>
           </div>
         </div>
         <div class="toolbar-group">
@@ -230,7 +247,15 @@
             <button type="button" class="palette-chip" data-kind="rest" data-duration="" title="Silencio de corchea">𝄾</button>
             <button type="button" class="palette-chip" data-kind="rest" data-duration="/2" title="Silencio de semicorchea">𝄿</button>
             <button type="button" class="palette-chip" data-kind="rest" data-duration="/4" title="Silencio de fusa">𝅀</button>
+            <button type="button" class="palette-chip" data-kind="rest" data-duration="/8" title="Silencio de semifusa">𝅁</button>
           </div>
+        </div>
+        <div class="toolbar-group">
+          <label>Al soltar</label>
+          <label class="check-row" title="Con esto activado, soltar una figura sobre una nota existente la convierte en acorde en vez de insertar una nota nueva">
+            <input type="checkbox" id="chord-mode" />
+            <span>Apilar en acorde</span>
+          </label>
         </div>
         <div class="toolbar-group">
           <label for="accidental-select">Alteración</label>
@@ -239,6 +264,16 @@
             <option value="^">Sostenido ♯</option>
             <option value="_">Bemol ♭</option>
             <option value="=">Becuadro ♮</option>
+            <option value="^^">Doble sostenido 𝄪</option>
+            <option value="__">Doble bemol 𝄫</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label for="dot-select">Puntillo</label>
+          <select id="dot-select">
+            <option value="0">Sin puntillo</option>
+            <option value="1">Puntillo ·</option>
+            <option value="2">Doble puntillo ··</option>
           </select>
         </div>
         <div class="toolbar-group">
@@ -247,10 +282,16 @@
             <option value="0">Normal</option>
             <option value="2">Doscillo (2)</option>
             <option value="3">Tresillo (3)</option>
+            <option value="4">Cuatrillo (4)</option>
             <option value="5">Cincillo (5)</option>
             <option value="6">Seisillo (6)</option>
             <option value="7">Septillo (7)</option>
+            <option value="9">Nonillo (9)</option>
           </select>
+          <div class="btn-row" style="margin-top: 6px">
+            <button type="button" id="apply-tuplet-btn" title="Convierte las notas seleccionadas en este grupo especial">Aplicar a selección</button>
+            <button type="button" id="clear-tuplet-btn" title="Quita el grupo especial de las notas seleccionadas">Quitar grupo</button>
+          </div>
         </div>
         <div class="toolbar-group">
           <label>Otros</label>
@@ -258,7 +299,76 @@
             <button type="button" id="barline-btn">Barra |</button>
             <button type="button" id="repeat-start-btn">|:</button>
             <button type="button" id="repeat-end-btn">:|</button>
+            <button type="button" id="ending1-btn" title="Primera vez">|1</button>
+            <button type="button" id="ending2-btn" title="Segunda vez">|2</button>
           </div>
+        </div>
+      </div>
+
+      <div class="note-toolbar">
+        <div class="toolbar-group">
+          <label>Acorde <span class="label-hint">(sobre la selección)</span></label>
+          <div class="btn-row" id="chord-palette">
+            <button type="button" data-steps="2" title="Añadir una tercera por encima">+3ª</button>
+            <button type="button" data-steps="4" title="Añadir una quinta por encima">+5ª</button>
+            <button type="button" data-steps="7" title="Añadir la octava por encima">+8ª</button>
+            <button type="button" data-steps="-2" title="Añadir una tercera por debajo">−3ª</button>
+            <button type="button" data-steps="-4" title="Añadir una quinta por debajo">−5ª</button>
+            <button type="button" data-steps="-7" title="Añadir la octava por debajo">−8ª</button>
+            <button type="button" id="merge-chord-btn" title="Unir las notas seleccionadas en un solo acorde">Unir</button>
+            <button type="button" id="split-chord-btn" title="Quitar la nota más aguda del acorde">Quitar</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <label for="dynamic-select">Matiz</label>
+          <select id="dynamic-select">
+            <option value="">—</option>
+            <option value="!ppp!">ppp</option>
+            <option value="!pp!">pp</option>
+            <option value="!p!">p</option>
+            <option value="!mp!">mp</option>
+            <option value="!mf!">mf</option>
+            <option value="!f!">f</option>
+            <option value="!ff!">ff</option>
+            <option value="!fff!">fff</option>
+            <option value="!sfz!">sfz</option>
+            <option value="!crescendo(!">crescendo (inicio)</option>
+            <option value="!crescendo)!">crescendo (fin)</option>
+            <option value="!diminuendo(!">diminuendo (inicio)</option>
+            <option value="!diminuendo)!">diminuendo (fin)</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label for="articulation-select">Articulación</label>
+          <select id="articulation-select">
+            <option value="">—</option>
+            <option value="!staccato!">Staccato ·</option>
+            <option value="!accent!">Acento &gt;</option>
+            <option value="!tenuto!">Tenuto —</option>
+            <option value="!marcato!">Marcato ^</option>
+            <option value="!fermata!">Calderón 𝄐</option>
+            <option value="!trill!">Trino tr</option>
+            <option value="!mordent!">Mordente</option>
+            <option value="!turn!">Grupeto</option>
+            <option value="!arpeggio!">Arpegio</option>
+            <option value="!upbow!">Arco arriba</option>
+            <option value="!downbow!">Arco abajo</option>
+            <option value="!breath!">Respiración</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label>Edición <span class="label-hint">(Ctrl+C/X/V)</span></label>
+          <div class="btn-row">
+            <button type="button" id="copy-btn" title="Copiar la selección (Ctrl+C)">Copiar</button>
+            <button type="button" id="cut-btn" title="Cortar la selección (Ctrl+X)">Cortar</button>
+            <button type="button" id="paste-btn" title="Pegar (Ctrl+V)">Pegar</button>
+            <button type="button" id="slur-btn" title="Ligadura de expresión sobre la selección">Ligadura</button>
+            <button type="button" id="select-all-btn" title="Seleccionar todas las notas (Ctrl+A)">Todo</button>
+          </div>
+        </div>
+        <div class="toolbar-group" id="drum-group" hidden>
+          <label>Percusión <span class="label-hint">(arrastra al pentagrama de batería)</span></label>
+          <div class="btn-row" id="drum-palette"></div>
         </div>
       </div>
       <p class="tuplet-hint" id="tuplet-hint"></p>
@@ -423,6 +533,7 @@
     </main>
   </div>
 
+  <div id="select-band" class="select-band" hidden></div>
   <div id="drag-ghost" class="drag-ghost" hidden></div>
   <div id="context-menu" class="context-menu" hidden></div>
   <div id="note-preview" class="note-preview" hidden></div>

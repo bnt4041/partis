@@ -27,6 +27,9 @@ const scoreContainer = document.getElementById("score-container");
 const playbackStatusEl = document.getElementById("playback-status");
 
 const abcTextarea = document.getElementById("abc-source");
+const undoBtn = document.getElementById("undo-btn");
+const redoBtn = document.getElementById("redo-btn");
+const versionsBtn = document.getElementById("versions-btn");
 
 const stageEl = document.getElementById("stage");
 const sheetEl = document.getElementById("sheet");
@@ -34,6 +37,9 @@ const railEl = document.getElementById("rail");
 const viewModeEl = document.getElementById("view-mode");
 const zoomLabelEl = document.getElementById("zoom-label");
 
+const propTitleInput = document.getElementById("prop-title");
+const propHeaderInput = document.getElementById("prop-header");
+const propFooterInput = document.getElementById("prop-footer");
 const propKeySelect = document.getElementById("prop-key");
 const propTimeSelect = document.getElementById("prop-time");
 const propTempoInput = document.getElementById("prop-tempo");
@@ -566,6 +572,34 @@ function replaceHeaderLine(abc, field, value) {
   return `${field}:${value}\n${abc}`;
 }
 
+// abcjs's %%header/%%footer formatting directives (page decoration, only
+// drawn when rendering with `print: true` - see computeScoreRenderOptions).
+// Read the current text (if any) so the "Encabezado"/"Pie de página" fields
+// can be pre-filled, and write it back as a single centered %%directive
+// line right after the K: header, or remove the line entirely when cleared.
+function getDirectiveValue(abc, name) {
+  const m = abc.match(new RegExp(`^%%${name}\\s+"([^"]*)"\\s*$`, "m"));
+  return m ? m[1] : "";
+}
+
+function setDirectiveValue(abc, name, value) {
+  const lines = abc.split("\n").filter((l) => !new RegExp(`^%%${name}\\b`).test(l));
+  if (!value.trim()) return lines.join("\n");
+
+  const { keyLineIdx } = parseAbcHeaders(lines.join("\n"));
+  const directive = `%%${name} "${value.replace(/"/g, "'")}"`;
+  if (keyLineIdx === -1) return `${directive}\n${lines.join("\n")}`;
+  lines.splice(keyLineIdx + 1, 0, directive);
+  return lines.join("\n");
+}
+
+// True if the ABC has a %%header or %%footer directive - abcjs only draws
+// those when told this is a "print" render, which also forces the SVG to a
+// full page height regardless of content, so it's only worth it in page view.
+function hasPageDecoration(abc) {
+  return /^%%(header|footer)\b/m.test(abc);
+}
+
 function updateVoiceHeader(abc, voiceId, { clef, name, program }) {
   const lines = abc.split("\n");
   const headerRe = new RegExp(`^V:\\s*${voiceId}\\b`);
@@ -631,7 +665,19 @@ function moveVoice(voiceId, direction) {
   const idx = voices.findIndex((v) => v.id === voiceId);
   const targetIdx = idx + direction;
   if (idx === -1 || targetIdx < 0 || targetIdx >= voices.length) return;
-  setAbc(reorderVoice(currentAbc, voiceId, voices[targetIdx].id, direction > 0));
+  let abc = reorderVoice(currentAbc, voiceId, voices[targetIdx].id, direction > 0);
+  // If some voices share a staff (see addVoiceToSameStaff), the "%%score"
+  // line - not the V: block order - is what actually controls staff layout,
+  // so it has to be re-synced to the new order or "move up/down" would look
+  // like it did nothing.
+  if (/^%%score\s+/m.test(abc)) {
+    const newIds = parseAbcHeaders(abc).voices.map((v) => v.id);
+    const groups = parseScoreGroups(abc, newIds);
+    groups.forEach((g) => g.sort((a, b) => newIds.indexOf(a) - newIds.indexOf(b)));
+    groups.sort((a, b) => newIds.indexOf(a[0]) - newIds.indexOf(b[0]));
+    abc = setScoreGroups(abc, groups);
+  }
+  setAbc(abc);
 }
 
 function countMeasures(abc, voiceId) {
@@ -648,8 +694,14 @@ function countMeasures(abc, voiceId) {
     }
     if (collecting) text += ` ${line}`;
   }
-  const matches = text.match(/\|/g);
-  return matches ? Math.max(1, Math.round(matches.length / 2)) : 4;
+  // Count the stretches between barlines that actually hold something
+  // playable: repeat marks ("|:", ":|") and the trailing barline produce empty
+  // segments, and inline fields like [K:C] must not read as notes.
+  const segments = text
+    .replace(/\[[A-Za-z]:[^\]]*\]/g, "")
+    .split("|")
+    .filter((s) => /[A-Ga-gxXzZ]/.test(s));
+  return Math.max(1, segments.length);
 }
 
 // How many L-units (the score's basic note-length unit) fit in one measure,
@@ -712,6 +764,15 @@ function currentMeasureStart(fullText, insertAt) {
   return start;
 }
 
+// abcjs's own default "p notes in the time of q" ratios (from its tokenizer,
+// tripletQ table) for a bare "(p" marker with no explicit ":q:r". A tuplet's
+// written notes DON'T reduce their own duration digits - "(3" just means the
+// next 3 notes, at their normal written length, together take 2/3 of that -
+// so measure-capacity accounting has to apply this ratio too, or it treats a
+// triplet as taking MORE room than it really does and closes/splits the bar
+// too early.
+const TUPLET_TIME_OF = { 2: 3, 3: 2, 4: 3, 5: 2, 6: 2, 7: 2, 8: 3, 9: 2 };
+
 // Sum the note/rest duration (in L-units) written so far in `measureText`
 // (normally the slice from currentMeasureStart() up to the insertion point).
 // Returns null when it hits something it doesn't know how to account for
@@ -720,6 +781,16 @@ function currentMeasureStart(fullText, insertAt) {
 function sumMeasureUnits(measureText) {
   let units = 0;
   let k = 0;
+  let tupletLeft = 0; // notes still to come in the tuplet group currently open
+  let tupletRatio = 1;
+  function addDuration(durUnits) {
+    if (tupletLeft > 0) {
+      units += durUnits * tupletRatio;
+      tupletLeft -= 1;
+    } else {
+      units += durUnits;
+    }
+  }
   while (k < measureText.length) {
     const ch = measureText[k];
     if (/\s/.test(ch)) {
@@ -739,7 +810,10 @@ function sumMeasureUnits(measureText) {
       continue;
     }
     if (ch === "(" && /\d/.test(measureText[k + 1] || "")) {
-      k += 2; // tuplet marker, e.g. "(3" - takes no time itself
+      const size = parseInt(measureText[k + 1], 10);
+      tupletLeft = size;
+      tupletRatio = (TUPLET_TIME_OF[size] || size) / size;
+      k += 2; // the marker itself, e.g. "(3", takes no time
       continue;
     }
     if (ch === "(" || ch === ")" || ch === "-" || ch === ">" || ch === "<") {
@@ -757,7 +831,7 @@ function sumMeasureUnits(measureText) {
       const durMatch = measureText.slice(end + 1).match(/^(\d*\/?\d*)/);
       const durUnits = parseAbcDurationUnits(durMatch ? durMatch[1] : "");
       if (durUnits === null) return null;
-      units += durUnits;
+      addDuration(durUnits);
       k = end + 1 + (durMatch ? durMatch[0].length : 0);
       continue;
     }
@@ -765,13 +839,38 @@ function sumMeasureUnits(measureText) {
     if (noteMatch) {
       const durUnits = parseAbcDurationUnits(noteMatch[2]);
       if (durUnits === null) return null;
-      units += durUnits;
+      addDuration(durUnits);
       k += noteMatch[0].length;
       continue;
     }
     return null; // something we don't recognise: bail out rather than guess
   }
   return units;
+}
+
+// After changing the time signature, any voice that's still just placeholder
+// rests (nothing composed into it yet) needs those rests resized to the new
+// measure length - otherwise a fresh blank score (started at the default
+// 4/4, "z8" per bar) switched to, say, 3/4 for a waltz keeps that 8-unit
+// rest sitting in a 6-unit bar, and the very first notes written into it
+// inherit an already-overflowing measure. A voice that already has real
+// notes is left untouched - only rewrite bars nothing has been written into.
+function resizeBlankRestsToNewMeter(abc, newHeaders) {
+  const { keyLineIdx, voices } = parseAbcHeaders(abc);
+  if (keyLineIdx === -1 || !voices.length) return abc;
+  const lines = abc.split("\n");
+  const restToken = restsForMeasure(newHeaders);
+  for (const voice of voices) {
+    const voiceLineIdx = lines.findIndex((l) => new RegExp(`^V:\\s*${voice.id}\\b`).test(l));
+    if (voiceLineIdx === -1 || voiceLineIdx + 1 >= lines.length) continue;
+    const bodyLine = lines[voiceLineIdx + 1];
+    if (/^V:|^%%/.test(bodyLine)) continue; // this voice has no body line to resize
+    const isAllRests = bodyLine.trim() !== "" && !/[A-Ga-g]/.test(bodyLine.replace(/\[[A-Za-z]:[^\]]*\]/g, ""));
+    if (!isAllRests) continue;
+    const measureCount = countMeasures(abc, voice.id);
+    lines[voiceLineIdx + 1] = `${Array(measureCount).fill(restToken).join(" | ")} |`;
+  }
+  return lines.join("\n");
 }
 
 function addVoice() {
@@ -789,8 +888,95 @@ function addVoice() {
   setAbc(`${currentAbc.replace(/\s*$/, "")}\n${block}\n`);
 }
 
+// ===================== Voices sharing one staff =====================
+//
+// "+ Voz" above always gives the new voice its OWN staff (abcjs's default:
+// one staff per V:). To have two voices share the same staff lines instead
+// (independent rhythms/stems on one staff - a solo + harmony line, reduced
+// choral parts...) abcjs needs an explicit "%%score (id1 id2)" directive:
+// parentheses merge those voices onto one staff, a bare id or a group in
+// its own parentheses keeps its own staff.
+
+// "%%score (1 2) 3" -> [["1","2"], ["3"]]. No such line yet -> every voice
+// on its own staff, which is what plain ABC (no directive at all) means.
+function parseScoreGroups(abc, voiceIds) {
+  const m = abc.match(/^%%score\s+(.+)$/m);
+  if (!m) return voiceIds.map((id) => [id]);
+  const groups = [];
+  const re = /\(([^)]+)\)|(\S+)/g;
+  let gm;
+  while ((gm = re.exec(m[1]))) {
+    groups.push(gm[1] ? gm[1].trim().split(/\s+/) : [gm[2]]);
+  }
+  const mentioned = new Set(groups.flat());
+  voiceIds.filter((id) => !mentioned.has(id)).forEach((id) => groups.push([id]));
+  return groups;
+}
+
+function scoreLineFromGroups(groups) {
+  return `%%score ${groups.map((g) => (g.length > 1 ? `(${g.join(" ")})` : g[0])).join(" ")}`;
+}
+
+// Insert/replace the "%%score" line, right after K: (before any V: line) if
+// it doesn't exist yet - where abcjs expects a tune-wide layout directive.
+function setScoreGroups(abc, groups) {
+  const line = scoreLineFromGroups(groups);
+  if (/^%%score\s+.+$/m.test(abc)) return abc.replace(/^%%score\s+.+$/m, line);
+  const { keyLineIdx } = parseAbcHeaders(abc);
+  if (keyLineIdx === -1) return abc;
+  const lines = abc.split("\n");
+  lines.splice(keyLineIdx + 1, 0, line);
+  return lines.join("\n");
+}
+
+// Drop groups down to one voice each (the plain-ABC default) removes the
+// directive line entirely instead of leaving a pointless "%%score 1 2 3".
+function stripTrivialScoreLine(abc) {
+  const { voices } = parseAbcHeaders(abc);
+  const groups = parseScoreGroups(abc, voices.map((v) => v.id));
+  if (groups.some((g) => g.length > 1)) return abc;
+  return abc.replace(/^%%score\s+.+\n?/m, "");
+}
+
+function addVoiceToSameStaff(targetVoiceId) {
+  const { headers, voices } = parseAbcHeaders(currentAbc);
+  const target = voices.find((v) => v.id === targetVoiceId);
+  if (!target) return;
+  const ids = voices.map((v) => v.id);
+  let n = 1;
+  while (ids.includes(String(n))) n++;
+  const newId = String(n);
+
+  const groups = parseScoreGroups(currentAbc, ids);
+  const targetGroup = groups.find((g) => g.includes(targetVoiceId));
+  if (targetGroup) targetGroup.push(newId);
+  else groups.push([targetVoiceId, newId]);
+
+  const measureCount = countMeasures(currentAbc, targetVoiceId);
+  const restToken = restsForMeasure(headers);
+  const restLine = `${Array(measureCount).fill(restToken).join(" | ")} |`;
+  // Opposite stem direction from the staff's other voice(s), so the two
+  // lines stay visually distinct instead of overlapping note heads.
+  const block = `V:${newId} clef=${target.clef} name="Voz ${n}" stem=down\n${restLine}`;
+
+  let abc = currentAbc;
+  const targetLineRe = new RegExp(`^(V:\\s*${targetVoiceId}\\b.*)$`, "m");
+  if (!/\bstem=/.test(targetLineRe.exec(abc)[0])) {
+    abc = abc.replace(targetLineRe, "$1 stem=up");
+  }
+  abc = setScoreGroups(abc, groups);
+  setAbc(`${abc.replace(/\s*$/, "")}\n${block}\n`);
+}
+
 function removeVoice(voiceId) {
-  setAbc(removeVoiceBlock(currentAbc, voiceId));
+  let abc = removeVoiceBlock(currentAbc, voiceId);
+  const { voices } = parseAbcHeaders(abc);
+  const remainingIds = voices.map((v) => v.id);
+  const groups = parseScoreGroups(abc, remainingIds)
+    .map((g) => g.filter((id) => id !== voiceId))
+    .filter((g) => g.length > 0);
+  abc = stripTrivialScoreLine(setScoreGroups(abc, groups));
+  setAbc(abc);
 }
 
 // ===================== Rendering =====================
@@ -841,12 +1027,18 @@ function buildStaffMap() {
 
   const topLineEls = [...svg.querySelectorAll(".abcjs-top-line")];
   const { voices } = parseAbcHeaders(currentAbc);
+  // A staff can carry more than one voice (see addVoiceToSameStaff) - groups
+  // gives, per rendered staff, the voice ids in the same order abcjs fills
+  // st.voices[0], st.voices[1]... there. Without a %%score directive this is
+  // just each voice on its own staff, same as before.
+  const groups = parseScoreGroups(currentAbc, voices.map((v) => v.id));
   const map = [];
   let flatIndex = 0;
 
   (visualObj.lines || []).forEach((line) => {
     (line.staff || []).forEach((st, si) => {
       const topLineEl = topLineEls[flatIndex];
+      const staffVoiceIds = groups[si] || [];
       flatIndex += 1;
       if (!topLineEl) return;
 
@@ -857,16 +1049,26 @@ function buildStaffMap() {
       const bottomY = Math.max(...ys);
       const spacing = ys.length > 1 ? (bottomY - topY) / (ys.length - 1) : 12;
 
-      const voice = voices[si];
-      const elements = ((st.voices && st.voices[0]) || [])
-        .filter((e) => e.abselem && typeof e.abselem.x === "number")
-        .map((e) => ({ startChar: e.startChar, endChar: e.endChar, x: e.abselem.x }));
+      const primaryVoice = voices.find((v) => v.id === staffVoiceIds[0]);
+      const elements = [];
+      (st.voices || []).forEach((voiceEls, vi) => {
+        const voiceId = staffVoiceIds[vi] || staffVoiceIds[0] || String(si + 1);
+        (voiceEls || [])
+          .filter((e) => e.abselem && typeof e.abselem.x === "number")
+          .forEach((e) =>
+            // Keep the abselem itself, not just its x - pickElementNearPoint()
+            // needs its actual rendered screen rect to tell two voices' notes
+            // on the same beat of a shared staff apart by height.
+            elements.push({ startChar: e.startChar, endChar: e.endChar, x: e.abselem.x, abselem: e.abselem, voiceId })
+          );
+      });
+      elements.sort((a, b) => a.x - b.x);
 
       map.push({
         topY,
         spacing,
-        voiceId: voice ? voice.id : String(si + 1),
-        clef: voice ? voice.clef : "treble",
+        voiceId: staffVoiceIds[0] || String(si + 1),
+        clef: primaryVoice ? primaryVoice.clef : "treble",
         elements,
       });
     });
@@ -893,6 +1095,39 @@ function svgPointToScreen(svg, x, y) {
   pt.y = y;
   const transformed = pt.matrixTransform(ctm);
   return { x: transformed.x, y: transformed.y };
+}
+
+// Among candidate elements, find the one closest to a click point - by x
+// (time) first and foremost, but breaking near-ties in x by actual rendered
+// screen height. That second case is what happens whenever a staff carries
+// more than one voice (see addVoiceToSameStaff): two voices sounding on the
+// same beat land at (near enough) the identical x, and can only be told
+// apart by which one the click is vertically closer to. clientY/svgPt are
+// the same click in the two coordinate systems this needs: screen pixels for
+// comparing against each element's real rendered position, SVG units for x
+// (already what el.x/abselem.x are in). xTolerance bounds how close in x
+// counts as "close enough that height should decide it" - only computed
+// (abselemScreenRect isn't free) when it might actually matter.
+function pickElementNearPoint(elements, svgPt, clientY, xTolerance) {
+  if (!elements.length) return null;
+  let best = null;
+  let bestScore = Infinity;
+  for (const el of elements) {
+    const dx = Math.abs(el.x - svgPt.x);
+    let dy = 0;
+    if (dx < xTolerance) {
+      const r = el.abselem ? abselemScreenRect(el.abselem) : null;
+      dy = r ? Math.abs((r.top + r.bottom) / 2 - clientY) : 0;
+    }
+    // dx dominates - it's the real "which beat" signal - dy only breaks a
+    // near-tie between voices landing on the same beat.
+    const score = dx * 1000 + dy;
+    if (score < bestScore) {
+      bestScore = score;
+      best = el;
+    }
+  }
+  return best;
 }
 
 // Given a drop point in page coordinates, find the closest staff, compute the
@@ -936,15 +1171,22 @@ function computeDropInsertion(clientX, clientY) {
   const pitchAbsolute = topAbsolute + steps;
   const snappedSvgY = best.topY - steps * halfSpacing;
 
+  // Which voice this click belongs to (see pickElementNearPoint) - then the
+  // insertion point is found within just THAT voice's own notes, so it never
+  // lands mid-way through a different voice's text.
+  const nearest = pickElementNearPoint(best.elements, pt, clientY, best.spacing * 3);
+  const voiceId = nearest ? nearest.voiceId : best.voiceId;
+  const ownElements = best.elements.filter((el) => el.voiceId === voiceId);
+
   let anchor = null;
-  for (const el of best.elements) {
+  for (const el of ownElements) {
     if (el.x <= pt.x) anchor = el;
     else break;
   }
-  const insertAt = anchor ? anchor.endChar : best.elements[0] ? best.elements[0].startChar : null;
+  const insertAt = anchor ? anchor.endChar : ownElements[0] ? ownElements[0].startChar : null;
   if (insertAt === null) return null;
 
-  return { insertAt, pitchAbsolute, voiceId: best.voiceId, svg, svgX: pt.x, snappedSvgY };
+  return { insertAt, pitchAbsolute, voiceId, svg, svgX: pt.x, snappedSvgY };
 }
 
 const SOLFEGE_ES = ["Do", "Re", "Mi", "Fa", "Sol", "La", "Si"];
@@ -970,6 +1212,36 @@ function keyLabel(abcKey) {
   return `${base}${acc}${minor ? "m" : ""}`;
 }
 
+// ===================== Armed palette (click-to-place) =====================
+//
+// Dragging a palette chip onto the score still places it exactly where
+// dropped, as before. A plain click on a chip now arms it instead of
+// inserting immediately: the chip stays highlighted, and the NEXT click on
+// the score places the note/rest/drum hit there (pitch from the click's
+// vertical position, same as a drop). Clicking the same chip again, picking
+// another one, or Escape cancels it. This lets you keep composing by
+// clicking repeatedly on the staff without re-grabbing the chip each time.
+
+let armedPalette = null; // { kind, duration, label, pitchToken, btn } | null
+
+function clearArmedPalette() {
+  if (armedPalette) armedPalette.btn.classList.remove("is-armed");
+  armedPalette = null;
+  scoreContainer.classList.remove("is-armed-cursor");
+  hideNotePreview();
+}
+
+function setArmedPalette(entry) {
+  if (armedPalette && armedPalette.btn === entry.btn) {
+    clearArmedPalette();
+    return;
+  }
+  if (armedPalette) armedPalette.btn.classList.remove("is-armed");
+  armedPalette = entry;
+  entry.btn.classList.add("is-armed");
+  scoreContainer.classList.add("is-armed-cursor");
+}
+
 function showNotePreviewAt(result, overrideLabel) {
   const screenPt = svgPointToScreen(result.svg, result.svgX, result.snappedSvgY);
   notePreviewEl.style.left = `${screenPt.x}px`;
@@ -987,9 +1259,105 @@ function hideNotePreview() {
   notePreviewLabelEl.hidden = true;
 }
 
-function buildNoteOrRestToken(kind, pitchAbsolute, accidental, durationSuffix) {
+// `pitchToken` forces a literal ABC pitch instead of one derived from where
+// the note was dropped - that's how the drum palette places a bombo on the
+// line its %%MIDI drummap assigns to it, whatever the vertical drop position.
+function buildNoteOrRestToken(kind, pitchAbsolute, accidental, durationSuffix, pitchToken) {
   if (kind === "rest") return `z${durationSuffix}`;
+  if (pitchToken) return `${pitchToken}${durationSuffix}`;
   return `${accidental}${absoluteToAbcPitch(pitchAbsolute)}${durationSuffix}`;
+}
+
+// The "Puntillo" selector in the note toolbar: a dot makes the figure you
+// place 1.5x longer, a double dot 1.75x.
+function selectedDotFactor() {
+  const dotSelect = document.getElementById("dot-select");
+  return DOT_FACTORS[parseInt(dotSelect ? dotSelect.value : "0", 10) || 0] || 1;
+}
+
+// ===================== Key signature vs. written accidentals ===============
+//
+// An accidental in ABC (and in every other notation) isn't per-note: writing
+// "^F" makes every OTHER plain "F" in that same octave sound sharp for the
+// rest of the bar too, until a barline or an explicit accidental cancels it.
+// So picking "Ninguna" in the Alteración selector can't just mean "write
+// nothing" - if an earlier note this bar already bent that same pitch away
+// from the key signature, "normal" has to explicitly spell out the key
+// signature's own accidental (or a natural "=") to cancel the one still in
+// the air, or the note would silently keep sounding altered.
+
+const SHARP_ORDER = ["F", "C", "G", "D", "A", "E", "B"];
+const FLAT_ORDER = ["B", "E", "A", "D", "G", "C", "F"];
+
+// Sharps (positive) / flats (negative) in the signature of each tonic, as if
+// it were major.
+const MAJOR_SIGNATURE_COUNT = {
+  C: 0, G: 1, D: 2, A: 3, E: 4, B: 5, "F#": 6, "C#": 7,
+  F: -1, Bb: -2, Eb: -3, Ab: -4, Db: -5, Gb: -6, Cb: -7,
+};
+
+// Sharps to add/subtract from that tonic-as-major count for each mode -
+// e.g. D dorian shares C major's signature (0 sharps), and D-as-major would
+// be 2 sharps, so dorian's offset is -2.
+const MODE_SIGNATURE_OFFSET = {
+  major: 0, minor: -3, dorian: -2, phrygian: -4, lydian: 1, mixolydian: -1, locrian: -5,
+};
+
+function modeNameFromAbc(modeRaw) {
+  const mode = (modeRaw || "").toLowerCase();
+  if (mode.startsWith("maj") || mode.startsWith("ion")) return "major";
+  if (mode.startsWith("dor")) return "dorian";
+  if (mode.startsWith("phr")) return "phrygian";
+  if (mode.startsWith("lyd")) return "lydian";
+  if (mode.startsWith("mix")) return "mixolydian";
+  if (mode.startsWith("loc")) return "locrian";
+  if (mode.startsWith("m") || mode.startsWith("aeo")) return "minor"; // m, min, minor, aeolian
+  return "major";
+}
+
+// { C: "", D: "", ... } -> "" (natural per the key), "^" or "_" for each
+// letter, from a K: header value like "D", "Bb", "F#m", "Ador".
+function keySignatureAccidentals(keyValue) {
+  const map = { C: "", D: "", E: "", F: "", G: "", A: "", B: "" };
+  const v = (keyValue || "").trim();
+  const m = v.match(/^([A-G])([#b]?)\s*([A-Za-z]*)/);
+  if (!m) return map;
+  const [, letter, accChar, modeRaw] = m;
+  const count = MAJOR_SIGNATURE_COUNT[letter + accChar] + MODE_SIGNATURE_OFFSET[modeNameFromAbc(modeRaw)];
+  if (count === undefined || Number.isNaN(count)) return map;
+  if (count > 0) {
+    for (let i = 0; i < Math.min(count, 7); i++) map[SHARP_ORDER[i]] = "^";
+  } else if (count < 0) {
+    for (let i = 0; i < Math.min(-count, 7); i++) map[FLAT_ORDER[i]] = "_";
+  }
+  return map;
+}
+
+function stripAnnotations(text) {
+  return text.replace(/"[^"]*"/g, "").replace(/![^!]*!/g, "");
+}
+
+// What accidental (possibly none) needs to be WRITTEN for `pitchAbsolute` to
+// actually sound like the key signature says it should, given what's already
+// been explicitly written on that same pitch (same letter+octave) earlier in
+// `measureText`.
+function resolveNormalAccidental(measureText, keyValue, pitchAbsolute) {
+  const token = absoluteToAbcPitch(pitchAbsolute);
+  const m = token.match(/^([A-Ga-g])([,']*)$/);
+  if (!m) return "";
+  const [, letter, octaveMarks] = m;
+  const keyDefault = keySignatureAccidentals(keyValue)[letter.toUpperCase()] || "";
+  const re = /(\^{1,2}|_{1,2}|=)?([A-Ga-g])([,']*)/g;
+  const clean = stripAnnotations(measureText);
+  let mm;
+  let carried;
+  while ((mm = re.exec(clean))) {
+    const [, acc, l, oct] = mm;
+    if (!acc) continue; // a plain note doesn't change what's carrying
+    if (l === letter && oct === octaveMarks) carried = acc;
+  }
+  if (carried === undefined || carried === keyDefault) return "";
+  return keyDefault || "=";
 }
 
 // Insert a note/rest at `insertAt`. If it doesn't fit in what's left of the
@@ -997,27 +1365,54 @@ function buildNoteOrRestToken(kind, pitchAbsolute, accidental, durationSuffix) {
 // or split it across the barline as two tied notes (partial fit) - so the
 // user never has to manually fix up the bar after dropping a note that's too
 // long for the space that's left.
-function insertPaletteItem(insertAt, kind, duration, pitchAbsolute) {
-  const accidental = kind === "rest" ? "" : accidentalSelect.value;
-  const wantedUnits = parseAbcDurationUnits(duration);
+function insertPaletteItem(insertAt, kind, duration, pitchAbsolute, opts = {}) {
+  const pitchToken = opts.pitchToken || null;
   const { headers } = parseAbcHeaders(currentAbc);
-  const capacity = unitsPerMeasureFromHeaders(headers);
   const measureStart = currentMeasureStart(currentAbc, insertAt);
-  const used = wantedUnits === null ? null : sumMeasureUnits(currentAbc.slice(measureStart, insertAt));
+  const measureTextSoFar = currentAbc.slice(measureStart, insertAt);
+  let accidental = kind === "rest" || pitchToken ? "" : accidentalSelect.value;
+  // "Ninguna" chosen explicitly (or just the default): if this same pitch was
+  // altered earlier in the bar, spell out what "normal" really is instead of
+  // silently inheriting that alteration - see resolveNormalAccidental() above.
+  if (!accidental && kind === "note" && !pitchToken) {
+    accidental = resolveNormalAccidental(measureTextSoFar, headers.K, pitchAbsolute);
+  }
+  const baseUnits = parseAbcDurationUnits(duration);
+  const wantedUnits = baseUnits === null ? null : baseUnits * selectedDotFactor();
+  // What this note will actually cost the measure - a written eighth note
+  // only costs 2/3 of that if it's about to land inside an active/armed
+  // tuplet, same discount sumMeasureUnits() already applies to earlier notes.
+  const tupletRatio = peekTupletRatio();
+  const realUnits = wantedUnits === null ? null : wantedUnits * tupletRatio;
+  const capacity = unitsPerMeasureFromHeaders(headers);
+  const used = wantedUnits === null ? null : sumMeasureUnits(measureTextSoFar);
   const remaining = used === null ? null : capacity - used;
 
   let text;
-  if (remaining === null || remaining >= wantedUnits - 1e-6) {
-    const token = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits));
+  if (remaining === null || remaining >= realUnits - 1e-6) {
+    const token = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits), pitchToken);
     text = `${applyTupletMarker(token)} `;
   } else if (remaining <= 1e-6) {
-    const token = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits));
+    const token = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits), pitchToken);
     text = `| ${applyTupletMarker(token)} `;
   } else {
-    const first = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(remaining));
-    const second = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits - remaining));
-    const tie = kind === "rest" ? "" : "-";
-    text = `${applyTupletMarker(first)}${tie}| ${second} `;
+    // A tuplet note can't be split across a barline (the "(n" group has to
+    // stay contiguous) - if it doesn't fully fit, close the bar instead.
+    if (tupletRatio !== 1) {
+      const token = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(wantedUnits), pitchToken);
+      text = `| ${applyTupletMarker(token)} `;
+    } else {
+      const first = buildNoteOrRestToken(kind, pitchAbsolute, accidental, unitsToAbcDurationSuffix(remaining), pitchToken);
+      const second = buildNoteOrRestToken(
+        kind,
+        pitchAbsolute,
+        accidental,
+        unitsToAbcDurationSuffix(wantedUnits - remaining),
+        pitchToken
+      );
+      const tie = kind === "rest" ? "" : "-";
+      text = `${applyTupletMarker(first)}${tie}| ${second} `;
+    }
   }
 
   if (accidental) accidentalSelect.value = "";
@@ -1034,21 +1429,35 @@ function insertPaletteItem(insertAt, kind, duration, pitchAbsolute) {
 
 let tupletState = { size: 0, remaining: 0 };
 
+// What applyTupletMarker() would do to the NEXT note's real duration,
+// without placing anything - insertPaletteItem needs this to know how much
+// of the measure a note will really use before deciding whether it fits, the
+// same way sumMeasureUnits() already discounts notes already on the page.
+function peekTupletRatio() {
+  const size = tupletState.remaining > 0 ? tupletState.size : parseInt(tupletSelect.value, 10) || 0;
+  return size > 0 ? (TUPLET_TIME_OF[size] || size) / size : 1;
+}
+
 function updateTupletHint() {
   if (tupletState.remaining > 0) {
     tupletHintEl.textContent = `Coloca ${tupletState.remaining} nota(s) más para completar el grupo de ${tupletState.size}.`;
-  } else {
-    tupletHintEl.textContent = "";
+    return;
   }
+  const armedSize = parseInt(tupletSelect.value, 10) || 0;
+  tupletHintEl.textContent = armedSize > 0 ? `Grupo completo. El siguiente grupo de ${armedSize} empezará solo.` : "";
 }
 
 function applyTupletMarker(token) {
   if (tupletState.remaining > 0) {
     tupletState.remaining -= 1;
-    if (tupletState.remaining === 0) tupletSelect.value = "0";
     updateTupletHint();
     return token;
   }
+  // A completed group does NOT clear the selector: it stays armed so placing
+  // many notes in a row (the normal way to fill a bar with triplets) starts
+  // a new group each time automatically, instead of silently falling back to
+  // plain notes after the first group - which used to leave most of what you
+  // placed out of rhythm.
   const armedSize = parseInt(tupletSelect.value, 10) || 0;
   if (armedSize > 0) {
     tupletState = { size: armedSize, remaining: armedSize - 1 };
@@ -1061,7 +1470,7 @@ function applyTupletMarker(token) {
 tupletSelect.addEventListener("change", () => {
   const size = parseInt(tupletSelect.value, 10) || 0;
   tupletState = { size: 0, remaining: 0 };
-  tupletHintEl.textContent = size > 0 ? `El siguiente grupo de ${size} notas/silencios que coloques formará un grupo de ${size}.` : "";
+  tupletHintEl.textContent = size > 0 ? `Cada ${size} notas/silencios que coloques formarán un grupo de ${size}, hasta que elijas "Normal".` : "";
 });
 
 function abcTokenToAbsolute(token) {
@@ -1173,9 +1582,13 @@ function renderScore() {
       selectTypes: ["note", "rest"],
       clickListener: handleScoreInteraction,
       selectionColor: "#5f8dff",
+      // Header/footer only draw in abcjs's "print" media (which also forces
+      // a full page height) - only worth that trade-off in page view.
+      print: viewState.mode === "page" && hasPageDecoration(currentAbc),
       ...scoreFontOptions(),
     });
     visualObj = tunes[0];
+    renderStaffMuteButtons();
     updatePlaybackTune();
   } catch (err) {
     console.error("Error rendering ABC", err);
@@ -1323,7 +1736,22 @@ async function updatePlaybackTune() {
   }
   await ensureSynthControl();
   try {
-    await synthControl.setTune(visualObj, false, { chordsOff: false, ...metronomeParams() });
+    // setTune(visualObj, userAction, options): passing `false` for userAction
+    // (there's no user gesture at render time, just an edit) makes abcjs
+    // update its own reference to visualObj WITHOUT rebuilding the actual
+    // audio buffer - it only does that lazily, the next time something calls
+    // go()/play(), and only if isLoaded is still false. Since a first play
+    // already flips isLoaded to true, every edit made after that first play
+    // was silently ignored: Play kept resynthesizing the buffer from
+    // whatever the score looked like at that first play, forever after.
+    // Forcing isLoaded back to false here is what makes the NEXT play()
+    // actually rebuild from the current (just-edited) visualObj.
+    await synthControl.setTune(visualObj, false, {
+      chordsOff: false,
+      voicesOff: mutedVoiceIndices(),
+      ...metronomeParams(),
+    });
+    synthControl.isLoaded = false;
     setPlaybackStatus("");
   } catch (err) {
     console.error(err);
@@ -1393,9 +1821,15 @@ function startCustomDrag(startEvent, { label, onDrop, onClick, onMoveOver, onMov
 
 // ===================== Context menu =====================
 
-function showContextMenu(x, y, items) {
+// `items` are {label, onClick} / {separator:true} / {label, submenu:[...]}.
+// A submenu replaces the menu in place (there isn't room to fan out a second
+// panel next to it), so it gets a "◂ Volver" entry back to `parentItems`.
+function showContextMenu(x, y, items, parentItems) {
   contextMenuEl.innerHTML = "";
-  items.forEach((item) => {
+  const list = parentItems
+    ? [{ label: "◂ Volver", onClick: () => showContextMenu(x, y, parentItems) }, { separator: true }, ...items]
+    : items;
+  list.forEach((item) => {
     if (item.separator) {
       contextMenuEl.appendChild(document.createElement("hr"));
       return;
@@ -1412,6 +1846,10 @@ function showContextMenu(x, y, items) {
       // longer exists anywhere, contextMenuEl.contains(e.target) is false,
       // so it immediately hides the submenu that was just opened.
       e.stopPropagation();
+      if (item.submenu) {
+        showContextMenu(x, y, item.submenu, list === items ? items : parentItems || items);
+        return;
+      }
       hideContextMenu();
       item.onClick();
     });
@@ -1420,6 +1858,14 @@ function showContextMenu(x, y, items) {
   contextMenuEl.style.left = `${x}px`;
   contextMenuEl.style.top = `${y}px`;
   contextMenuEl.hidden = false;
+
+  // Long menus (the note menu has a dozen entries) would otherwise run off the
+  // bottom of the window when right-clicking near it.
+  contextMenuEl.style.maxHeight = `${Math.max(160, window.innerHeight - y - 16)}px`;
+  const rect = contextMenuEl.getBoundingClientRect();
+  if (rect.right > window.innerWidth - 8) {
+    contextMenuEl.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+  }
 }
 
 function hideContextMenu() {
@@ -1446,13 +1892,15 @@ function findScoreHit(clientX, clientY) {
   if (!svg || !visualObj) return null;
   const pt = screenToSvgPoint(svg, clientX, clientY);
   const { voices } = parseAbcHeaders(currentAbc);
+  // See buildStaffMap(): a staff can carry more than one voice.
+  const groups = parseScoreGroups(currentAbc, voices.map((v) => v.id));
   const topLineEls = [...svg.querySelectorAll(".abcjs-top-line")];
   let flatIndex = 0;
 
   for (const line of visualObj.lines || []) {
     for (const st of line.staff || []) {
       const topLineEl = topLineEls[flatIndex];
-      const voice = voices[flatIndex];
+      const staffVoiceIds = groups[flatIndex] || [];
       flatIndex += 1;
       if (!topLineEl) continue;
 
@@ -1466,27 +1914,30 @@ function findScoreHit(clientX, clientY) {
       const tolerance = spacing * 3;
       if (pt.y < topY - tolerance || pt.y > topY + staffHeight + tolerance) continue;
 
-      const elements = ((st.voices && st.voices[0]) || []).filter((e) => e.abselem && typeof e.abselem.x === "number");
-      let best = null;
-      let bestDist = Infinity;
-      for (const el of elements) {
-        const dist = Math.abs(el.abselem.x - pt.x);
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = el;
-        }
-      }
-      const voiceId = voice ? voice.id : String(flatIndex);
+      const elements = [];
+      (st.voices || []).forEach((voiceEls, vi) => {
+        const voiceId = staffVoiceIds[vi] || staffVoiceIds[0] || String(flatIndex);
+        (voiceEls || [])
+          .filter((e) => e.abselem && typeof e.abselem.x === "number")
+          .forEach((e) => elements.push({ ...e, voiceId, x: e.abselem.x }));
+      });
+
+      // See pickElementNearPoint(): x picks the beat, real screen height
+      // breaks ties between voices sounding on the same beat of a shared staff.
+      const best = pickElementNearPoint(elements, pt, clientY, spacing * 3);
+      const bestDist = best ? Math.abs(best.x - pt.x) : Infinity;
       if (best && best.el_type === "note" && bestDist < spacing * 1.5) {
-        return { kind: "note", voiceId, startChar: best.startChar, endChar: best.endChar, abselem: best.abselem };
+        return { kind: "note", voiceId: best.voiceId, startChar: best.startChar, endChar: best.endChar, abselem: best.abselem };
       }
 
+      elements.sort((a, b) => a.x - b.x);
       let anchor = null;
       for (const el of elements) {
-        if (el.abselem.x <= pt.x) anchor = el;
+        if (el.x <= pt.x) anchor = el;
         else break;
       }
       const insertAt = anchor ? anchor.endChar : elements[0] ? elements[0].startChar : null;
+      const voiceId = anchor ? anchor.voiceId : staffVoiceIds[0] || String(flatIndex);
       return { kind: "staff", voiceId, insertAt };
     }
   }
@@ -1506,47 +1957,212 @@ function applyToSelection(transformToken) {
   setAbc(abc);
 }
 
+// ---------- Note token parsing ----------
+//
+// A "note token" - the slice of ABC between an element's startChar/endChar -
+// carries much more than the pitch: leading whitespace (the first note of a
+// bar arrives as " C2"), a tuplet marker, grace notes, chord symbols,
+// decorations, a chord in brackets, a duration and a tie. Everything that
+// edits a note goes through this parser, so no transform silently no-ops on a
+// note that happens to be the first of its measure or part of a chord.
+const NOTE_TOKEN_RE = new RegExp(
+  "^(\\s*)" + // 1 leading whitespace
+    "((?:\\(\\d+(?::\\d+){0,2})?(?:\\{[^}]*\\})?(?:(?:\"[^\"]*\"|![^!]*!|[.~HLMOPSTuv])\\s*)*)" + // 2 tuplet/grace/chord-symbol/decorations
+    "(\\[[^\\]]*\\]|(?:\\^{1,2}|_{1,2}|=)?[A-Ga-gxXzZ][,']*)" + // 3 chord or single pitch
+    "((?:\\d+)?(?:\\/+\\d*)?)" + // 4 duration
+    "(-?)" + // 5 tie
+    "(\\s*)$" // 6 trailing whitespace
+);
+
+function parseNoteToken(token) {
+  const m = token.match(NOTE_TOKEN_RE);
+  if (!m) return null;
+  const [, lead, prefix, body, duration, tie, trail] = m;
+  if (/^\[[A-Za-z]:/.test(body)) return null; // an inline field like [K:C], not a note
+  return { lead, prefix, body, duration, tie, trail };
+}
+
+function buildNoteToken(p) {
+  return `${p.lead}${p.prefix}${p.body}${p.duration}${p.tie}${p.trail}`;
+}
+
+function isRestBody(body) {
+  return /^[xXzZ]/.test(body);
+}
+
+// The individual pitches of a token: one entry for a plain note, several for
+// a chord written as [CEG].
+function tokenPitches(body) {
+  if (body.startsWith("[")) return body.slice(1, -1).match(/(?:\^{1,2}|_{1,2}|=)?[A-Ga-g][,']*/g) || [];
+  return [body];
+}
+
+function pitchesToBody(pitches) {
+  const unique = [...new Set(pitches)].sort((a, b) => (abcTokenToAbsolute(a) ?? 0) - (abcTokenToAbsolute(b) ?? 0));
+  return unique.length > 1 ? `[${unique.join("")}]` : unique[0] || "";
+}
+
+// Map every pitch of a token (all of them, if it's a chord) through `fn`.
+function mapTokenPitches(token, fn) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  p.body = pitchesToBody(tokenPitches(p.body).map(fn));
+  return buildNoteToken(p);
+}
+
 function setTokenDuration(token, durationSuffix) {
-  const m = token.match(/^(\(\d+)?(\^{1,2}|_{1,2}|=)?([A-Ga-gxXzZ])([,']*)(.*)$/);
-  if (!m) return token;
-  const [, tuplet = "", accidental = "", letter, octave = ""] = m;
-  return `${tuplet}${accidental}${letter}${octave}${durationSuffix}`;
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  p.duration = durationSuffix;
+  return buildNoteToken(p);
 }
 
 function scaleTokenDuration(token, factor) {
-  const m = token.match(/^(\(\d+)?(\^{1,2}|_{1,2}|=)?([A-Ga-gxXzZ])([,']*)(\d*\/?\d*)$/);
-  if (!m) return token;
-  const [, tuplet = "", accidental = "", letter, octave = "", durSuffix] = m;
-  const units = parseAbcDurationUnits(durSuffix);
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  const units = parseAbcDurationUnits(p.duration);
   if (units === null) return token;
-  return `${tuplet}${accidental}${letter}${octave}${unitsToAbcDurationSuffix(units * factor)}`;
+  p.duration = unitsToAbcDurationSuffix(units * factor);
+  return buildNoteToken(p);
 }
+
+// ---------- Dots (puntillo / doble puntillo) ----------
+//
+// ABC has no dot character: a dotted note is just written longer (a dotted
+// eighth in L:1/8 is "3/2"). So "how many dots does this have" has to be read
+// back out of the written length - a plain figure is a power of two of the
+// L-unit, one dot multiplies it by 3/2 and two dots by 7/4.
+
+const DOT_FACTORS = [1, 1.5, 1.75];
+
+function isBinaryDuration(units) {
+  if (!(units > 0)) return false;
+  const l = Math.log2(units);
+  return Math.abs(l - Math.round(l)) < 1e-6;
+}
+
+function durationDotCount(units) {
+  for (let dots = 0; dots < DOT_FACTORS.length; dots++) {
+    if (isBinaryDuration(units / DOT_FACTORS[dots])) return dots;
+  }
+  return -1; // not a plain figure with 0-2 dots (a tuplet member, say)
+}
+
+function setTokenDots(token, dots) {
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  const units = parseAbcDurationUnits(p.duration);
+  if (units === null) return token;
+  const current = durationDotCount(units);
+  if (current === -1) return token;
+  p.duration = unitsToAbcDurationSuffix((units / DOT_FACTORS[current]) * DOT_FACTORS[dots]);
+  return buildNoteToken(p);
+}
+
+// ---------- Chords ----------
+
+function addChordNote(token, steps) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  const pitches = tokenPitches(p.body);
+  const reference = steps >= 0 ? pitches[pitches.length - 1] : pitches[0];
+  p.body = pitchesToBody([...pitches, shiftAbcNoteToken(reference, steps)]);
+  return buildNoteToken(p);
+}
+
+function removeChordNote(token) {
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  const pitches = tokenPitches(p.body);
+  if (pitches.length < 2) return token;
+  p.body = pitchesToBody(pitches.slice(0, -1));
+  return buildNoteToken(p);
+}
+
+// ---------- Accidentals, decorations, octaves ----------
 
 const ACCIDENTAL_ORDER = ["__", "_", "", "^", "^^"];
 
-function shiftTokenAccidental(token, direction) {
-  const m = token.match(/^(\(\d+)?(\^{1,2}|_{1,2}|=)?([A-Ga-gxXzZ])(.*)$/);
-  if (!m) return token;
-  const [, tuplet = "", accidental = "", letter, rest] = m;
-  if (letter.toLowerCase() === "z" || letter.toLowerCase() === "x") return token; // rests have no pitch
+function shiftPitchAccidental(pitch, direction) {
+  const m = pitch.match(/^(\^{1,2}|_{1,2}|=)?(.*)$/);
+  const [, accidental = "", rest] = m;
   const normalized = accidental === "=" ? "" : accidental;
   let idx = ACCIDENTAL_ORDER.indexOf(normalized);
   if (idx === -1) idx = 2;
   idx = Math.min(ACCIDENTAL_ORDER.length - 1, Math.max(0, idx + direction));
-  return `${tuplet}${ACCIDENTAL_ORDER[idx]}${letter}${rest}`;
+  return `${ACCIDENTAL_ORDER[idx]}${rest}`;
 }
 
-function addFermata(token) {
-  return `!fermata!${token}`;
+function shiftTokenAccidental(token, direction) {
+  return mapTokenPitches(token, (pitch) => shiftPitchAccidental(pitch, direction));
+}
+
+// Same as shiftTokenAccidental, but for just ONE pitch of a chord - so a note
+// stacked with a click above/below (see addChordToneAtClick) can be altered
+// on its own afterwards, the same way you'd alter a single note, instead of
+// always dragging every other note of the chord along with it.
+function shiftOnePitchAccidental(token, index, direction) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  const pitches = tokenPitches(p.body);
+  if (index < 0 || index >= pitches.length) return token;
+  pitches[index] = shiftPitchAccidental(pitches[index], direction);
+  p.body = pitchesToBody(pitches);
+  return buildNoteToken(p);
+}
+
+function shiftTokenPitch(token, steps) {
+  return mapTokenPitches(token, (pitch) => shiftAbcNoteToken(pitch, steps));
+}
+
+// Decorations (!accent!, !p!, !fermata!...) go immediately before the note, so
+// they end up in the token's prefix - after any tuplet marker, which has to
+// stay first.
+function addDecoration(token, decoration) {
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  if (p.prefix.includes(decoration)) return token;
+  p.prefix += decoration;
+  return buildNoteToken(p);
+}
+
+function clearDecorations(token) {
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  p.prefix = p.prefix.replace(/![^!]*!/g, "").replace(/\{[^}]*\}/g, "");
+  return buildNoteToken(p);
+}
+
+// A grace note (apoyatura) one diatonic step above/below the note itself.
+function addGraceNote(token, steps) {
+  const p = parseNoteToken(token);
+  if (!p || isRestBody(p.body)) return token;
+  if (/\{/.test(p.prefix)) return token;
+  const grace = shiftAbcNoteToken(tokenPitches(p.body)[0], steps);
+  const tupletMatch = p.prefix.match(/^\(\d+(?::\d+){0,2}/);
+  const tuplet = tupletMatch ? tupletMatch[0] : "";
+  p.prefix = `${tuplet}{${grace}}${p.prefix.slice(tuplet.length)}`;
+  return buildNoteToken(p);
+}
+
+// ---------- Tuplet markers on an existing selection ----------
+
+function setTokenTuplet(token, size) {
+  const p = parseNoteToken(token);
+  if (!p) return token;
+  p.prefix = p.prefix.replace(/^\(\d+(?::\d+){0,2}/, "");
+  if (size > 0) p.prefix = `(${size}${p.prefix}`;
+  return buildNoteToken(p);
 }
 
 // Notes become a same-duration rest (keeps the bar's total length correct);
 // rests just vanish entirely.
 function tokenToRestOrEmpty(token) {
-  const m = token.match(/^(\(\d+)?(\^{1,2}|_{1,2}|=)?([A-Ga-g])([,']*)(.*)$/);
-  if (!m) return "";
-  const [, tuplet = "", , , , durSuffix = ""] = m;
-  return `${tuplet}z${durSuffix}`;
+  const p = parseNoteToken(token);
+  if (!p) return "";
+  if (isRestBody(p.body)) return "";
+  const tupletMatch = p.prefix.match(/^\(\d+(?::\d+){0,2}/);
+  return `${p.lead}${tupletMatch ? tupletMatch[0] : ""}z${p.duration}${p.trail}`;
 }
 
 function deleteNoteSelection() {
@@ -1556,75 +2172,353 @@ function deleteNoteSelection() {
 function tieSelectedWithNext() {
   if (noteSelection.length !== 1) return;
   const r = noteSelection[0];
-  setAbc(currentAbc.slice(0, r.end) + "-" + currentAbc.slice(r.end));
+  const token = currentAbc.slice(r.start, r.end);
+  const trail = (token.match(/\s*$/) || [""])[0].length;
+  const at = r.end - trail;
+  setAbc(currentAbc.slice(0, at) + "-" + currentAbc.slice(at));
+}
+
+// The selection in text order, which is what every multi-note operation
+// (chord merge, tuplet, slur, copy) needs - clicking notes with ctrl held
+// records them in click order, not score order.
+function orderedSelection() {
+  return [...noteSelection].sort((a, b) => a.start - b.start);
+}
+
+// Fuse the selected notes into a single chord: all their pitches, the first
+// one's duration, everything in between removed.
+function mergeSelectionIntoChord() {
+  if (noteSelection.length < 2) {
+    flashPlaybackStatus("Selecciona al menos dos notas para unirlas en un acorde.");
+    return;
+  }
+  const ranges = orderedSelection();
+  const first = parseNoteToken(currentAbc.slice(ranges[0].start, ranges[0].end));
+  if (!first || isRestBody(first.body)) return;
+
+  const pitches = [];
+  for (const r of ranges) {
+    const p = parseNoteToken(currentAbc.slice(r.start, r.end));
+    if (!p || isRestBody(p.body)) {
+      flashPlaybackStatus("Solo se pueden unir notas (no silencios).");
+      return;
+    }
+    pitches.push(...tokenPitches(p.body));
+  }
+
+  first.body = pitchesToBody(pitches);
+  first.trail = first.trail || " ";
+  const start = ranges[0].start;
+  const end = ranges[ranges.length - 1].end;
+  setAbc(currentAbc.slice(0, start) + buildNoteToken(first) + currentAbc.slice(end));
+}
+
+// Mark the selected notes as a tuplet: ABC only tags the FIRST note of the
+// group with "(n", the rest just follow.
+function makeTupletFromSelection(size) {
+  const ranges = orderedSelection();
+  if (ranges.length < 2) {
+    flashPlaybackStatus("Selecciona las notas que forman el grupo.");
+    return;
+  }
+  const n = size || ranges.length;
+  const r = ranges[0];
+  setAbc(currentAbc.slice(0, r.start) + setTokenTuplet(currentAbc.slice(r.start, r.end), n) + currentAbc.slice(r.end));
+}
+
+// A phrasing slur is a plain "(" before the first note and ")" after the last
+// one - inserted around, not inside, the leading/trailing whitespace so the
+// bar's own spacing survives.
+function slurSelection() {
+  const ranges = orderedSelection();
+  if (ranges.length < 2) {
+    flashPlaybackStatus("Selecciona al menos dos notas para ligarlas.");
+    return;
+  }
+  const firstToken = currentAbc.slice(ranges[0].start, ranges[0].end);
+  const lastToken = currentAbc.slice(ranges[ranges.length - 1].start, ranges[ranges.length - 1].end);
+  const openAt = ranges[0].start + (firstToken.match(/^\s*/) || [""])[0].length;
+  const closeAt = ranges[ranges.length - 1].end - (lastToken.match(/\s*$/) || [""])[0].length;
+  if (closeAt <= openAt) return;
+
+  let abc = currentAbc.slice(0, closeAt) + ")" + currentAbc.slice(closeAt);
+  abc = abc.slice(0, openAt) + "(" + abc.slice(openAt);
+  setAbc(abc);
+}
+
+function selectAllNotes() {
+  const all = allNoteElements();
+  if (!all.length) return;
+  unhighlightSelection();
+  noteSelection = all.map((el) => ({ start: el.startChar, end: el.endChar, abselem: el.abselem }));
+  noteSelection.forEach((n) => {
+    try {
+      if (n.abselem && n.abselem.highlight) n.abselem.highlight();
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+// ===================== Clipboard (copy / cut / paste) =====================
+//
+// Kept in a variable rather than only in the system clipboard: what we copy
+// is raw ABC text, and reading the system clipboard needs a permission prompt
+// that would break the flow. We still push a copy out to the system clipboard
+// (best effort) so the notes can be pasted into the ABC panel or elsewhere.
+
+let scoreClipboard = "";
+
+function copySelection() {
+  const ranges = orderedSelection();
+  if (!ranges.length) {
+    flashPlaybackStatus("No hay notas seleccionadas.");
+    return false;
+  }
+  scoreClipboard = ranges
+    .map((r) => currentAbc.slice(r.start, r.end).trim())
+    .filter(Boolean)
+    .join(" ");
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(scoreClipboard).catch(() => {});
+  } catch {
+    /* clipboard blocked: the internal copy still works */
+  }
+  flashPlaybackStatus(`Copiado: ${ranges.length} nota(s).`);
+  updateClipboardButtons();
+  return true;
+}
+
+// Cut leaves rests behind rather than a hole, for the same reason Borrar does:
+// removing the text outright would leave the measure short.
+function cutSelection() {
+  if (!copySelection()) return;
+  deleteNoteSelection();
+}
+
+function pasteAt(insertAt) {
+  if (!scoreClipboard) {
+    flashPlaybackStatus("No hay nada copiado.");
+    return;
+  }
+  const at = insertAt === null || insertAt === undefined ? cursorPos : insertAt;
+  const text = `${scoreClipboard} `;
+  setAbc(currentAbc.slice(0, at) + text + currentAbc.slice(at));
+  cursorPos = at + text.length;
+}
+
+// Paste after the last selected note when there's a selection, otherwise at
+// the text cursor - the same "where would the next note go" rule the palette
+// already uses.
+function pasteAtSelectionOrCursor() {
+  const ranges = orderedSelection();
+  pasteAt(ranges.length ? ranges[ranges.length - 1].end : cursorPos);
+}
+
+function updateClipboardButtons() {
+  const pasteBtn = document.getElementById("paste-btn");
+  if (pasteBtn) pasteBtn.disabled = !scoreClipboard || !currentAbc.trim();
 }
 
 const DURATION_CHOICES = [
+  { duration: "16", label: "Cuadrada" },
   { duration: "8", label: "Redonda" },
   { duration: "4", label: "Blanca" },
   { duration: "2", label: "Negra" },
   { duration: "", label: "Corchea" },
   { duration: "/2", label: "Semicorchea" },
   { duration: "/4", label: "Fusa" },
+  { duration: "/8", label: "Semifusa" },
 ];
 
-function buildNoteContextMenu(x, y) {
+const DYNAMIC_CHOICES = [
+  { value: "!ppp!", label: "ppp" },
+  { value: "!pp!", label: "pp" },
+  { value: "!p!", label: "p" },
+  { value: "!mp!", label: "mp" },
+  { value: "!mf!", label: "mf" },
+  { value: "!f!", label: "f" },
+  { value: "!ff!", label: "ff" },
+  { value: "!fff!", label: "fff" },
+  { value: "!sfz!", label: "sfz" },
+  { value: "!crescendo(!", label: "crescendo (inicio)" },
+  { value: "!crescendo)!", label: "crescendo (fin)" },
+  { value: "!diminuendo(!", label: "diminuendo (inicio)" },
+  { value: "!diminuendo)!", label: "diminuendo (fin)" },
+];
+
+const ARTICULATION_CHOICES = [
+  { value: "!staccato!", label: "Staccato ·" },
+  { value: "!accent!", label: "Acento >" },
+  { value: "!tenuto!", label: "Tenuto —" },
+  { value: "!marcato!", label: "Marcato ^" },
+  { value: "!fermata!", label: "Calderón" },
+  { value: "!trill!", label: "Trino" },
+  { value: "!mordent!", label: "Mordente" },
+  { value: "!turn!", label: "Grupeto" },
+  { value: "!arpeggio!", label: "Arpegio" },
+  { value: "!upbow!", label: "Arco arriba" },
+  { value: "!downbow!", label: "Arco abajo" },
+  { value: "!breath!", label: "Respiración" },
+];
+
+const CHORD_INTERVALS = [
+  { steps: 2, label: "Tercera por encima" },
+  { steps: 4, label: "Quinta por encima" },
+  { steps: 7, label: "Octava por encima" },
+  { steps: 5, label: "Sexta por encima" },
+  { steps: -2, label: "Tercera por debajo" },
+  { steps: -4, label: "Quinta por debajo" },
+  { steps: -7, label: "Octava por debajo" },
+];
+
+const TUPLET_CHOICES = [2, 3, 4, 5, 6, 7, 9];
+
+function buildNoteContextMenu(hit) {
   const count = noteSelection.length;
   const suffix = count > 1 ? ` (${count})` : "";
+  const multi = count > 1;
+
   return [
-    {
-      label: `Cambiar figura${suffix} ▸`,
-      onClick: () =>
-        showContextMenu(
-          x,
-          y,
-          DURATION_CHOICES.map((d) => ({
-            label: d.label,
-            onClick: () => applyToSelection((token) => setTokenDuration(token, d.duration)),
-          }))
-        ),
-    },
-    { label: `Añadir puntillo${suffix}`, onClick: () => applyToSelection((token) => scaleTokenDuration(token, 1.5)) },
-    { label: `Quitar puntillo${suffix}`, onClick: () => applyToSelection((token) => scaleTokenDuration(token, 2 / 3)) },
+    { label: "▶ Reproducir desde aquí", onClick: () => playFromChar(hit.startChar) },
     { separator: true },
-    { label: `Subir semitono${suffix}`, onClick: () => applyToSelection((token) => shiftTokenAccidental(token, 1)) },
-    { label: `Bajar semitono${suffix}`, onClick: () => applyToSelection((token) => shiftTokenAccidental(token, -1)) },
-    ...(count === 1 ? [{ label: "Ligar con la siguiente nota", onClick: tieSelectedWithNext }] : []),
-    { label: `Añadir calderón${suffix}`, onClick: () => applyToSelection(addFermata) },
+    {
+      label: `Figura${suffix} ▸`,
+      submenu: [
+        ...DURATION_CHOICES.map((d) => ({
+          label: d.label,
+          onClick: () => applyToSelection((token) => setTokenDuration(token, d.duration)),
+        })),
+        { separator: true },
+        { label: "Doble de larga", onClick: () => applyToSelection((token) => scaleTokenDuration(token, 2)) },
+        { label: "Mitad de larga", onClick: () => applyToSelection((token) => scaleTokenDuration(token, 0.5)) },
+      ],
+    },
+    {
+      label: `Puntillo${suffix} ▸`,
+      submenu: [
+        { label: "Sin puntillo", onClick: () => applyToSelection((token) => setTokenDots(token, 0)) },
+        { label: "Puntillo ·", onClick: () => applyToSelection((token) => setTokenDots(token, 1)) },
+        { label: "Doble puntillo ··", onClick: () => applyToSelection((token) => setTokenDots(token, 2)) },
+      ],
+    },
+    {
+      label: `Acorde${suffix} ▸`,
+      submenu: [
+        ...CHORD_INTERVALS.map((i) => ({
+          label: `Añadir ${i.label.toLowerCase()}`,
+          onClick: () => applyToSelection((token) => addChordNote(token, i.steps)),
+        })),
+        { separator: true },
+        { label: "Quitar la nota más aguda", onClick: () => applyToSelection(removeChordNote) },
+        ...(multi ? [{ label: `Unir las ${count} notas en un acorde`, onClick: mergeSelectionIntoChord }] : []),
+      ],
+    },
+    {
+      label: `Grupo especial${suffix} ▸`,
+      submenu: [
+        ...TUPLET_CHOICES.map((n) => ({
+          label: `Grupo de ${n}${n === 3 ? " (tresillo)" : ""}`,
+          onClick: () => makeTupletFromSelection(n),
+        })),
+        { separator: true },
+        { label: "Quitar grupo", onClick: () => applyToSelection((token) => setTokenTuplet(token, 0)) },
+      ],
+    },
+    { separator: true },
+    {
+      label: `Altura${suffix} ▸`,
+      submenu: [
+        // hit.chordPitchIndex >= 0 means the right click landed on one
+        // specific note of a chord: offer to alter just that one, same as
+        // you would a single note, ahead of the whole-chord versions below.
+        ...(!multi && hit.chordPitchIndex >= 0
+          ? [
+              { label: "Subir semitono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchAccidental(token, hit.chordPitchIndex, 1)) },
+              { label: "Bajar semitono (esta nota)", onClick: () => applyToSelection((token) => shiftOnePitchAccidental(token, hit.chordPitchIndex, -1)) },
+              { separator: true },
+            ]
+          : []),
+        { label: "Subir semitono", onClick: () => applyToSelection((token) => shiftTokenAccidental(token, 1)) },
+        { label: "Bajar semitono", onClick: () => applyToSelection((token) => shiftTokenAccidental(token, -1)) },
+        { separator: true },
+        { label: "Subir un tono de la escala", onClick: () => applyToSelection((token) => shiftTokenPitch(token, 1)) },
+        { label: "Bajar un tono de la escala", onClick: () => applyToSelection((token) => shiftTokenPitch(token, -1)) },
+        { label: "Subir una octava", onClick: () => applyToSelection((token) => shiftTokenPitch(token, 7)) },
+        { label: "Bajar una octava", onClick: () => applyToSelection((token) => shiftTokenPitch(token, -7)) },
+      ],
+    },
+    {
+      label: `Matiz${suffix} ▸`,
+      submenu: DYNAMIC_CHOICES.map((d) => ({
+        label: d.label,
+        onClick: () => applyToSelection((token) => addDecoration(token, d.value)),
+      })),
+    },
+    {
+      label: `Articulación${suffix} ▸`,
+      submenu: [
+        ...ARTICULATION_CHOICES.map((a) => ({
+          label: a.label,
+          onClick: () => applyToSelection((token) => addDecoration(token, a.value)),
+        })),
+        { separator: true },
+        { label: "Quitar articulaciones y adornos", onClick: () => applyToSelection(clearDecorations) },
+      ],
+    },
+    {
+      label: `Ligaduras y adornos${suffix} ▸`,
+      submenu: [
+        ...(count === 1 ? [{ label: "Ligar con la siguiente nota", onClick: tieSelectedWithNext }] : []),
+        ...(multi ? [{ label: "Ligadura de expresión", onClick: slurSelection }] : []),
+        { label: "Apoyatura superior", onClick: () => applyToSelection((token) => addGraceNote(token, 1)) },
+        { label: "Apoyatura inferior", onClick: () => applyToSelection((token) => addGraceNote(token, -1)) },
+      ],
+    },
+    { separator: true },
+    { label: `Copiar${suffix}`, onClick: copySelection },
+    { label: `Cortar${suffix}`, onClick: cutSelection },
+    ...(scoreClipboard ? [{ label: "Pegar después", onClick: () => pasteAt(hit.endChar) }] : []),
     { separator: true },
     { label: `Borrar${suffix}`, danger: true, onClick: deleteNoteSelection },
   ];
 }
 
-function buildStaffContextMenu(hit, x, y) {
+function buildStaffContextMenu(hit) {
   const { voices } = parseAbcHeaders(currentAbc);
   const voice = voices.find((v) => v.id === hit.voiceId);
   const voiceLabel = voice && voice.name ? voice.name : `Voz ${hit.voiceId}`;
+  const isMuted = getMutedVoices(currentAbc).includes(hit.voiceId);
+  const isPerc = voice && voice.clef === "perc";
 
   return [
-    { label: "Añadir nota aquí", onClick: () => insertPaletteItem(hit.insertAt, "note", "", 6) },
+    { label: "▶ Reproducir desde aquí", onClick: () => playFromChar(hit.insertAt) },
+    { label: "⏯ Reproducir / Pausar", onClick: togglePlayback },
+    { separator: true },
+    ...(isPerc
+      ? [
+          {
+            label: "Añadir percusión aquí ▸",
+            submenu: DRUM_KIT.map((d) => ({
+              label: d.label,
+              onClick: () => insertPaletteItem(hit.insertAt, "note", "2", null, { pitchToken: d.pitch }),
+            })),
+          },
+        ]
+      : [{ label: "Añadir nota aquí", onClick: () => insertPaletteItem(hit.insertAt, "note", "", 6) }]),
     { label: "Añadir silencio aquí", onClick: () => insertPaletteItem(hit.insertAt, "rest", "", null) },
+    ...(scoreClipboard ? [{ label: "Pegar aquí", onClick: () => pasteAt(hit.insertAt) }] : []),
     { separator: true },
     {
       label: "Añadir armadura ▸",
-      onClick: () =>
-        showContextMenu(
-          x,
-          y,
-          KEY_OPTIONS.map((k) => ({
-            label: keyLabel(k),
-            onClick: () => applyValueAtPosition("K", k, { insertAt: hit.insertAt }),
-          }))
-        ),
+      submenu: KEY_OPTIONS.map((k) => ({
+        label: keyLabel(k),
+        onClick: () => applyValueAtPosition("K", k, { insertAt: hit.insertAt }),
+      })),
     },
     {
       label: "Cambiar compás ▸",
-      onClick: () =>
-        showContextMenu(
-          x,
-          y,
-          TIME_OPTIONS.map((t) => ({ label: t, onClick: () => applyQuickValue("M", t) }))
-        ),
+      submenu: TIME_OPTIONS.map((t) => ({ label: t, onClick: () => applyQuickValue("M", t) })),
     },
     {
       label: "Añadir texto",
@@ -1635,7 +2529,15 @@ function buildStaffContextMenu(hit, x, y) {
         setAbc(currentAbc.slice(0, hit.insertAt) + token + currentAbc.slice(hit.insertAt));
       },
     },
+    {
+      label: `Añadir voz en este pentagrama`,
+      onClick: () => addVoiceToSameStaff(hit.voiceId),
+    },
     { separator: true },
+    {
+      label: isMuted ? `Activar sonido de "${voiceLabel}"` : `Silenciar "${voiceLabel}"`,
+      onClick: () => toggleVoiceMute(hit.voiceId),
+    },
     {
       label: `Eliminar pentagrama "${voiceLabel}"`,
       danger: true,
@@ -1648,6 +2550,31 @@ function buildStaffContextMenu(hit, x, y) {
   ];
 }
 
+// Which pitch of a chord the click's height actually lands closest to - so
+// "Altura" in the context menu can alter just that one note, the same way it
+// would for a single note, instead of always moving every note of the chord
+// together. -1 for a plain (non-chord) note, since there's nothing to pick.
+function chordPitchIndexAtClick(clientX, clientY, startChar, endChar) {
+  const result = computeDropInsertion(clientX, clientY);
+  if (!result) return -1;
+  const parsed = parseNoteToken(currentAbc.slice(startChar, endChar));
+  if (!parsed || isRestBody(parsed.body)) return -1;
+  const pitches = tokenPitches(parsed.body);
+  if (pitches.length < 2) return -1;
+  let bestIndex = 0;
+  let bestDist = Infinity;
+  pitches.forEach((p, i) => {
+    const abs = abcTokenToAbsolute(p);
+    if (abs === null) return;
+    const dist = Math.abs(abs - result.pitchAbsolute);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIndex = i;
+    }
+  });
+  return bestIndex;
+}
+
 scoreContainer.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   const hit = findScoreHit(e.clientX, e.clientY);
@@ -1656,31 +2583,466 @@ scoreContainer.addEventListener("contextmenu", (e) => {
     if (!noteSelection.some((n) => n.start === hit.startChar && n.end === hit.endChar)) {
       selectNoteRange(hit.startChar, hit.endChar, hit.abselem, false);
     }
-    showContextMenu(e.clientX, e.clientY, buildNoteContextMenu(e.clientX, e.clientY));
+    hit.chordPitchIndex = chordPitchIndexAtClick(e.clientX, e.clientY, hit.startChar, hit.endChar);
+    showContextMenu(e.clientX, e.clientY, buildNoteContextMenu(hit));
   } else {
-    showContextMenu(e.clientX, e.clientY, buildStaffContextMenu(hit, e.clientX, e.clientY));
+    showContextMenu(e.clientX, e.clientY, buildStaffContextMenu(hit));
   }
 });
 
-// A left click that doesn't land on a selectable note/rest deselects, same as
-// clicking empty space in any other editor.
+// With a palette chip armed, a click on the score places it there instead of
+// selecting/deselecting - see setArmedPalette().
 scoreContainer.addEventListener("click", (e) => {
+  if (armedPalette) {
+    const result = computeDropInsertion(e.clientX, e.clientY);
+    if (result) {
+      const { kind, duration, pitchToken } = armedPalette;
+      if (kind === "note" && !pitchToken && document.getElementById("chord-mode").checked && stackPitchOnNoteAt(e.clientX, e.clientY, result)) {
+        return;
+      }
+      insertPaletteItem(result.insertAt, kind, duration, result.pitchAbsolute, { pitchToken });
+    }
+    return;
+  }
+  // Clicking above or below an existing note (not on its own notehead) adds
+  // it as a chord tone - see addChordToneAtClick().
+  if (addChordToneAtClick(e.clientX, e.clientY)) return;
+  // A left click that doesn't land on a selectable note/rest deselects, same
+  // as clicking empty space in any other editor - unless that same gesture
+  // was a rubber-band selection, whose mouseup also fires a click here.
+  if (suppressNextBackgroundClear) {
+    suppressNextBackgroundClear = false;
+    return;
+  }
   if (!e.target.closest("[data-index]")) clearNoteSelectionState();
 });
+
+// Live preview of where an armed chip would land, following the same
+// crosshair the drag-and-drop path already shows.
+scoreContainer.addEventListener("mousemove", (e) => {
+  if (!armedPalette) return;
+  const result = computeDropInsertion(e.clientX, e.clientY);
+  if (!result) {
+    hideNotePreview();
+    return;
+  }
+  showNotePreviewAt(result, armedPalette.kind === "rest" ? "Silencio" : armedPalette.pitchToken ? armedPalette.label : null);
+});
+scoreContainer.addEventListener("mouseleave", () => {
+  if (armedPalette) hideNotePreview();
+});
+
+// True while the keyboard belongs to a text field, so the score shortcuts
+// (space, Delete, Ctrl+C/V...) don't fight with typing.
+function typingInField() {
+  const active = document.activeElement;
+  return !!(
+    active &&
+    (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable)
+  );
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     hideContextMenu();
     clearNoteSelectionState();
+    clearArmedPalette();
     return;
   }
+  if (typingInField()) return;
+
+  // Space plays/pauses, like every other score editor. preventDefault stops
+  // the browser scrolling the stage at the same time.
+  if (e.code === "Space" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    togglePlayback();
+    return;
+  }
+
+  if (e.ctrlKey || e.metaKey) {
+    const key = e.key.toLowerCase();
+    if (key === "c" && noteSelection.length) {
+      e.preventDefault();
+      copySelection();
+    } else if (key === "x" && noteSelection.length) {
+      e.preventDefault();
+      cutSelection();
+    } else if (key === "v" && scoreClipboard) {
+      e.preventDefault();
+      pasteAtSelectionOrCursor();
+    } else if (key === "a" && currentAbc.trim()) {
+      e.preventDefault();
+      selectAllNotes();
+    } else if (key === "z" && e.shiftKey) {
+      e.preventDefault();
+      redo();
+    } else if (key === "z") {
+      e.preventDefault();
+      undo();
+    } else if (key === "y") {
+      e.preventDefault();
+      redo();
+    }
+    return;
+  }
+
   if (e.key !== "Delete" && e.key !== "Backspace") return;
-  const active = document.activeElement;
-  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
   if (noteSelection.length === 0) return;
   e.preventDefault();
   deleteNoteSelection();
 });
+
+// ===================== Rubber-band selection =====================
+//
+// Dragging from empty space inside the score selects every note the rectangle
+// touches. Notes themselves are left alone on mousedown: abcjs owns those, and
+// dragging one is how you change its pitch.
+
+const selectBandEl = document.getElementById("select-band");
+let suppressNextBackgroundClear = false;
+
+// Every note/rest element of the rendered score, flattened across systems,
+// staves and voices.
+function allNoteElements() {
+  const out = [];
+  ((visualObj && visualObj.lines) || []).forEach((line) =>
+    (line.staff || []).forEach((staff) =>
+      (staff.voices || []).forEach((voice) =>
+        (voice || []).forEach((el) => {
+          if (el.el_type === "note" && el.abselem && typeof el.startChar === "number") out.push(el);
+        })
+      )
+    )
+  );
+  return out;
+}
+
+// abcjs keeps the SVG nodes it drew for an element in `elemset`, which is also
+// what its own highlight() walks - so the on-screen box of a note is just the
+// union of those nodes' rects, no coordinate maths needed.
+function abselemScreenRect(abselem) {
+  const nodes = ((abselem && abselem.elemset) || []).filter((n) => n && typeof n.getBoundingClientRect === "function");
+  if (!nodes.length) return null;
+  return nodes.reduce((acc, node) => {
+    const r = node.getBoundingClientRect();
+    if (!acc) return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    return {
+      left: Math.min(acc.left, r.left),
+      top: Math.min(acc.top, r.top),
+      right: Math.max(acc.right, r.right),
+      bottom: Math.max(acc.bottom, r.bottom),
+    };
+  }, null);
+}
+
+function selectNotesInScreenRect(rect, additive) {
+  if (!additive) unhighlightSelection();
+  const kept = additive ? [...noteSelection] : [];
+  const picked = [];
+  allNoteElements().forEach((el) => {
+    const r = abselemScreenRect(el.abselem);
+    if (!r) return;
+    const hits = r.left <= rect.right && r.right >= rect.left && r.top <= rect.bottom && r.bottom >= rect.top;
+    if (!hits) return;
+    if (kept.some((n) => n.start === el.startChar && n.end === el.endChar)) return;
+    picked.push({ start: el.startChar, end: el.endChar, abselem: el.abselem });
+  });
+
+  noteSelection = [...kept, ...picked];
+  noteSelection.forEach((n) => {
+    try {
+      if (n.abselem && n.abselem.highlight) n.abselem.highlight();
+    } catch {
+      /* the SVG may have been replaced by a re-render */
+    }
+  });
+  return picked.length;
+}
+
+scoreContainer.addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || !visualObj) return;
+  if (armedPalette) return; // a click here places the armed chip instead
+  if (e.target.closest("[data-index]")) return; // a note: abcjs's own drag
+  if (e.target.closest(".staff-mute-btn")) return;
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+
+  const onMove = (ev) => {
+    if (!dragging && Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
+    dragging = true;
+    const left = Math.min(startX, ev.clientX);
+    const top = Math.min(startY, ev.clientY);
+    selectBandEl.style.left = `${left}px`;
+    selectBandEl.style.top = `${top}px`;
+    selectBandEl.style.width = `${Math.abs(ev.clientX - startX)}px`;
+    selectBandEl.style.height = `${Math.abs(ev.clientY - startY)}px`;
+    selectBandEl.hidden = false;
+  };
+
+  const onUp = (ev) => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    selectBandEl.hidden = true;
+    if (!dragging) return;
+    const rect = {
+      left: Math.min(startX, ev.clientX),
+      right: Math.max(startX, ev.clientX),
+      top: Math.min(startY, ev.clientY),
+      bottom: Math.max(startY, ev.clientY),
+    };
+    const count = selectNotesInScreenRect(rect, ev.ctrlKey || ev.metaKey || ev.shiftKey);
+    suppressNextBackgroundClear = true;
+    if (count) flashPlaybackStatus(`${noteSelection.length} nota(s) seleccionada(s).`);
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+});
+
+// ===================== Per-staff mute =====================
+//
+// Stored in the ABC itself (as a plain "%" comment, which every ABC parser
+// ignores) so it survives saving, reopening and exporting, instead of living
+// in a bit of browser state that a reload would lose.
+
+const MUTE_LINE_RE = /^%partis-mute\b(.*)$/m;
+
+function getMutedVoices(abc) {
+  const m = abc.match(MUTE_LINE_RE);
+  return m
+    ? m[1]
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function setMutedVoices(abc, ids) {
+  const lines = abc.split("\n").filter((l) => !/^%partis-mute\b/.test(l));
+  if (!ids.length) return lines.join("\n");
+  const { keyLineIdx } = parseAbcHeaders(lines.join("\n"));
+  const line = `%partis-mute ${ids.join(",")}`;
+  if (keyLineIdx === -1) return [line, ...lines].join("\n");
+  lines.splice(keyLineIdx + 1, 0, line);
+  return lines.join("\n");
+}
+
+function toggleVoiceMute(voiceId) {
+  const muted = getMutedVoices(currentAbc);
+  const next = muted.includes(voiceId) ? muted.filter((id) => id !== voiceId) : [...muted, voiceId];
+  setAbc(setMutedVoices(currentAbc, next));
+  flashPlaybackStatus(next.includes(voiceId) ? "Pentagrama silenciado." : "Pentagrama activado.");
+}
+
+// abcjs's synth takes the muted staves as indices into its flattened voice
+// array, which follows the order the V: headers appear in.
+function mutedVoiceIndices() {
+  const { voices } = parseAbcHeaders(currentAbc);
+  const muted = getMutedVoices(currentAbc);
+  return voices.map((v, i) => (muted.includes(v.id) ? i : -1)).filter((i) => i >= 0);
+}
+
+// A speaker button drawn at the start of each staff of the FIRST system - the
+// staves repeat on every system, and one toggle per voice is enough.
+//
+// They live in the sheet, not in the score container: abcjs sets
+// overflow:hidden on its own render target, which would clip anything placed
+// to the left of the staff.
+function renderStaffMuteButtons() {
+  sheetEl.querySelectorAll(".staff-mute-btn").forEach((el) => el.remove());
+  const svg = scoreContainer.querySelector("svg");
+  if (!svg || !visualObj || !visualObj.lines || !visualObj.lines.length) return;
+
+  const { voices } = parseAbcHeaders(currentAbc);
+  if (!voices.length) return;
+  const muted = getMutedVoices(currentAbc);
+  const topLineEls = [...svg.querySelectorAll(".abcjs-top-line")];
+  const staffCount = Math.min((visualObj.lines[0].staff || []).length, voices.length);
+  const sheetRect = sheetEl.getBoundingClientRect();
+  const labels = [...svg.querySelectorAll("text")];
+
+  for (let i = 0; i < staffCount; i++) {
+    const topLineEl = topLineEls[i];
+    if (!topLineEl) continue;
+    const group = topLineEl.parentElement || topLineEl;
+    const rect = group.getBoundingClientRect();
+    const voice = voices[i];
+    const isMuted = muted.includes(voice.id);
+
+    // abcjs prints the voice name in the margin to the left of the staff, so
+    // start from whatever is leftmost on this staff's row - otherwise the
+    // button would land on top of the name.
+    let anchorLeft = rect.left;
+    labels.forEach((label) => {
+      const r = label.getBoundingClientRect();
+      const centre = r.top + r.height / 2;
+      if (r.right <= rect.left && centre > rect.top - 8 && centre < rect.bottom + 8) {
+        anchorLeft = Math.min(anchorLeft, r.left);
+      }
+    });
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `staff-mute-btn${isMuted ? " is-muted" : ""}`;
+    btn.textContent = isMuted ? "🔇" : "🔊";
+    btn.title = `${isMuted ? "Activar el sonido de" : "Silenciar"} ${voice.name || `Voz ${voice.id}`}`;
+    btn.style.left = `${Math.max(2, anchorLeft - sheetRect.left - 26)}px`;
+    btn.style.top = `${rect.top - sheetRect.top + rect.height / 2 - 11}px`;
+    btn.addEventListener("mousedown", (e) => e.stopPropagation());
+    btn.addEventListener("contextmenu", (e) => e.stopPropagation());
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleVoiceMute(voice.id);
+    });
+    sheetEl.appendChild(btn);
+  }
+}
+
+// ===================== Percussion =====================
+//
+// A drum staff is a normal voice with clef=perc on MIDI channel 10, plus a
+// %%MIDI drummap line per line/space saying which General MIDI percussion
+// sound that position plays.
+
+const DRUM_KIT = [
+  { pitch: "F", midi: 36, label: "Bombo" },
+  { pitch: "c", midi: 38, label: "Caja" },
+  { pitch: "d", midi: 41, label: "Tom grave" },
+  { pitch: "e", midi: 45, label: "Tom medio" },
+  { pitch: "g", midi: 42, label: "Charles cerrado" },
+  { pitch: "a", midi: 46, label: "Charles abierto" },
+  { pitch: "b", midi: 49, label: "Platillo" },
+];
+
+function scoreHasPercussion() {
+  return parseAbcHeaders(currentAbc).voices.some((v) => v.clef === "perc");
+}
+
+function addDrumVoice() {
+  const { headers, voices } = parseAbcHeaders(currentAbc);
+  const ids = voices.map((v) => v.id);
+  let id = "P";
+  let n = 1;
+  while (ids.includes(id)) {
+    n += 1;
+    id = `P${n}`;
+  }
+
+  const measureCount = voices.length > 0 ? countMeasures(currentAbc, voices[0].id) : 4;
+  const restLine = `${Array(measureCount).fill(restsForMeasure(headers)).join(" | ")} |`;
+  const block = [
+    `V:${id} clef=perc name="${n === 1 ? "Batería" : `Batería ${n}`}"`,
+    "%%MIDI channel 10",
+    ...DRUM_KIT.map((d) => `%%MIDI drummap ${d.pitch} ${d.midi}`),
+    restLine,
+  ].join("\n");
+
+  setAbc(`${currentAbc.replace(/\s*$/, "")}\n${block}\n`);
+  flashPlaybackStatus("Pentagrama de percusión añadido.");
+}
+
+function setupDrumPalette() {
+  const container = document.getElementById("drum-palette");
+  container.innerHTML = "";
+  DRUM_KIT.forEach((drum) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "palette-chip drum-chip";
+    btn.textContent = drum.label;
+    btn.title = `${drum.label} - arrástralo al pentagrama de percusión`;
+    btn.addEventListener("mousedown", (e) => {
+      if (btn.disabled) return;
+      startCustomDrag(e, {
+        label: drum.label,
+        onMoveOver: (dropZone, x, y) => {
+          const result = computeDropInsertion(x, y);
+          if (result) showNotePreviewAt(result, drum.label);
+          else hideNotePreview();
+        },
+        onMoveLeave: hideNotePreview,
+        // The vertical drop position is ignored on purpose: on a drum staff the
+        // line is the instrument, and the button already says which one.
+        onDrop: (dropZone, x, y) => {
+          const result = computeDropInsertion(x, y);
+          if (!result) return;
+          insertPaletteItem(result.insertAt, "note", "2", null, { pitchToken: drum.pitch });
+        },
+        onClick: () => setArmedPalette({ kind: "note", duration: "2", label: drum.label, pitchToken: drum.pitch, btn }),
+      });
+    });
+    container.appendChild(btn);
+  });
+}
+
+function syncDrumGroup() {
+  document.getElementById("drum-group").hidden = !scoreHasPercussion();
+}
+
+// ===================== Playback control =====================
+
+async function togglePlayback() {
+  if (!visualObj) return;
+  if (!ABCJS.synth.supportsAudio()) {
+    setPlaybackStatus("Este navegador no soporta reproducción de audio (Web Audio API).");
+    return;
+  }
+  await ensureSynthControl();
+  try {
+    await synthControl.play();
+  } catch (err) {
+    console.error(err);
+    setPlaybackStatus("No se pudo reproducir esta partitura.");
+  }
+}
+
+// Where in the piece (in milliseconds) the note at character `charIndex`
+// sounds. abcjs computes those timings for us; we just have to match the
+// closest event, since a right-click can land between two notes.
+function millisecondsForChar(charIndex) {
+  if (!visualObj || typeof visualObj.setTiming !== "function") return 0;
+  try {
+    visualObj.setTiming(0, 0);
+  } catch {
+    return 0;
+  }
+  let best = null;
+  let bestDistance = Infinity;
+  (visualObj.noteTimings || []).forEach((ev) => {
+    if (ev.type !== "event") return;
+    const chars = ev.startCharArray && ev.startCharArray.length ? ev.startCharArray : [ev.startChar];
+    chars.forEach((c) => {
+      if (typeof c !== "number") return;
+      const distance = Math.abs(c - charIndex);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = ev;
+      }
+    });
+  });
+  return best ? best.milliseconds : 0;
+}
+
+async function playFromChar(charIndex) {
+  if (!visualObj) return;
+  if (!ABCJS.synth.supportsAudio()) {
+    setPlaybackStatus("Este navegador no soporta reproducción de audio (Web Audio API).");
+    return;
+  }
+  await ensureSynthControl();
+  try {
+    if (synthControl.isStarted) await synthControl.pause();
+    // seek() only works once the audio buffer exists, so make sure the tune is
+    // loaded before jumping - otherwise it would silently restart from zero.
+    if (!synthControl.isLoaded) await synthControl.go();
+    synthControl.seek(millisecondsForChar(charIndex) / 1000, "seconds");
+    await synthControl.play();
+  } catch (err) {
+    console.error(err);
+    setPlaybackStatus("No se pudo reproducir desde ese punto.");
+  }
+}
 
 function updateScoreTitleFromAbc() {
   const { headers } = parseAbcHeaders(currentAbc);
@@ -1697,6 +3059,7 @@ function updateToolbarEnabled() {
   propTimeSelect.disabled = !enabled;
   propTempoInput.disabled = !enabled;
   scoreActions.hidden = !enabled;
+  if (!enabled) clearArmedPalette();
 }
 
 // ===================== Properties panel =====================
@@ -1732,6 +3095,10 @@ function refreshNoteNaming() {
 function syncPropertiesPanel() {
   const { headers, voices } = parseAbcHeaders(currentAbc);
 
+  if (document.activeElement !== propTitleInput) propTitleInput.value = headers.T;
+  if (document.activeElement !== propHeaderInput) propHeaderInput.value = getDirectiveValue(currentAbc, "header");
+  if (document.activeElement !== propFooterInput) propFooterInput.value = getDirectiveValue(currentAbc, "footer");
+
   populateSelectOnce(propKeySelect, KEY_OPTIONS, keyLabel);
   populateSelectOnce(propTimeSelect, TIME_OPTIONS);
   ensureOptionExists(propKeySelect, headers.K, keyLabel);
@@ -1747,6 +3114,7 @@ function syncPropertiesPanel() {
     bass: "Clave de fa",
     alto: "Clave de do (alto)",
     tenor: "Clave de do (tenor)",
+    perc: "Percusión",
   };
 
   voiceListEl.innerHTML = "";
@@ -1848,6 +3216,8 @@ function syncPropertiesPanel() {
         { label: "Mover arriba", onClick: () => moveVoice(voice.id, -1) },
         { label: "Mover abajo", onClick: () => moveVoice(voice.id, 1) },
         { separator: true },
+        { label: "Añadir voz en este pentagrama", onClick: () => addVoiceToSameStaff(voice.id) },
+        { separator: true },
         { label: "Eliminar pentagrama", danger: true, onClick: () => removeVoice(voice.id) },
       ]);
     });
@@ -1858,13 +3228,86 @@ function syncPropertiesPanel() {
   });
 }
 
+propTitleInput.addEventListener("change", () => setAbc(replaceHeaderLine(currentAbc, "T", propTitleInput.value.trim() || "Sin título")));
+propHeaderInput.addEventListener("change", () => setAbc(setDirectiveValue(currentAbc, "header", propHeaderInput.value)));
+propFooterInput.addEventListener("change", () => setAbc(setDirectiveValue(currentAbc, "footer", propFooterInput.value)));
 propKeySelect.addEventListener("change", () => setAbc(replaceHeaderLine(currentAbc, "K", propKeySelect.value)));
-propTimeSelect.addEventListener("change", () => setAbc(replaceHeaderLine(currentAbc, "M", propTimeSelect.value)));
+propTimeSelect.addEventListener("change", () => {
+  const updated = replaceHeaderLine(currentAbc, "M", propTimeSelect.value);
+  const { headers } = parseAbcHeaders(updated);
+  setAbc(resizeBlankRestsToNewMeter(updated, headers));
+});
 propTempoInput.addEventListener("change", () => {
   const bpm = parseInt(propTempoInput.value, 10) || 120;
   setAbc(replaceHeaderLine(currentAbc, "Q", `1/4=${bpm}`));
 });
 addVoiceBtn.addEventListener("click", addVoice);
+document.getElementById("add-drum-voice-btn").addEventListener("click", addDrumVoice);
+
+// ---------- Toolbar actions that work on the current selection ----------
+
+function requireSelection() {
+  if (noteSelection.length === 0) {
+    flashPlaybackStatus("Selecciona antes una o varias notas en la partitura.");
+    return false;
+  }
+  return true;
+}
+
+document.querySelectorAll("#chord-palette [data-steps]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (!requireSelection()) return;
+    applyToSelection((token) => addChordNote(token, parseInt(btn.dataset.steps, 10)));
+  });
+});
+
+document.getElementById("merge-chord-btn").addEventListener("click", mergeSelectionIntoChord);
+document.getElementById("split-chord-btn").addEventListener("click", () => {
+  if (!requireSelection()) return;
+  applyToSelection(removeChordNote);
+});
+
+// The two "apply a mark" selects act like buttons: pick a value, it lands on
+// the selection, and they reset so the same one can be applied twice.
+function wireMarkSelect(id) {
+  const select = document.getElementById(id);
+  select.addEventListener("change", () => {
+    const value = select.value;
+    select.value = "";
+    if (!value) return;
+    if (!requireSelection()) return;
+    applyToSelection((token) => addDecoration(token, value));
+  });
+}
+wireMarkSelect("dynamic-select");
+wireMarkSelect("articulation-select");
+
+document.getElementById("copy-btn").addEventListener("click", copySelection);
+document.getElementById("cut-btn").addEventListener("click", cutSelection);
+document.getElementById("paste-btn").addEventListener("click", pasteAtSelectionOrCursor);
+document.getElementById("slur-btn").addEventListener("click", slurSelection);
+document.getElementById("select-all-btn").addEventListener("click", selectAllNotes);
+
+document.getElementById("ending1-btn").addEventListener("click", () => insertAtCursor("|1 "));
+document.getElementById("ending2-btn").addEventListener("click", () => insertAtCursor(":|2 "));
+
+// Apply the size chosen in "Grupo especial" directly to whatever notes are
+// currently selected - the select itself only arms sizes for NEW notes as
+// you place them (see applyTupletMarker), this is the equivalent for notes
+// already on the page.
+document.getElementById("apply-tuplet-btn").addEventListener("click", () => {
+  if (!requireSelection()) return;
+  const size = parseInt(tupletSelect.value, 10) || 0;
+  if (!size) {
+    flashPlaybackStatus("Elige antes un tamaño de grupo (tresillo, cincillo...).");
+    return;
+  }
+  makeTupletFromSelection(size);
+});
+document.getElementById("clear-tuplet-btn").addEventListener("click", () => {
+  if (!requireSelection()) return;
+  applyToSelection((token) => setTokenTuplet(token, 0));
+});
 
 // ===================== Core state setter =====================
 
@@ -1879,17 +3322,97 @@ function stripBlankLines(abc) {
     .join("\n");
 }
 
+// ===================== Undo / Redo =====================
+//
+// One entry per meaningful change to currentAbc. setAbc() (every button,
+// drag, chord, palette placement... goes through it) pushes the state it's
+// REPLACING onto the undo stack before applying the new one, and clears the
+// redo stack - a fresh edit invalidates whatever redo would have replayed.
+// Typing directly in the ABC editor bypasses setAbc (see its own "input"
+// listener below) and is coalesced into fewer steps there - otherwise every
+// keystroke would be its own undo step - by only pushing a new entry once
+// enough time has passed since the last one from that same typing burst.
+
+const undoStack = [];
+const redoStack = [];
+const UNDO_LIMIT = 200;
+const TYPING_COALESCE_MS = 700;
+let restoringHistory = false;
+let lastPushWasTyping = false;
+let lastPushAt = 0;
+
+// previousAbc is the state being replaced - callers only call this when it's
+// actually about to change (see setAbc() and the textarea "input" listener).
+function pushUndoPoint(previousAbc, { coalesceTyping = false } = {}) {
+  if (restoringHistory) return;
+  const now = Date.now();
+  if (coalesceTyping && lastPushWasTyping && now - lastPushAt < TYPING_COALESCE_MS) {
+    lastPushAt = now;
+    return; // still the same burst of typing - the snapshot already on top covers it
+  }
+  undoStack.push(previousAbc);
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack.length = 0;
+  lastPushWasTyping = coalesceTyping;
+  lastPushAt = now;
+  updateUndoRedoButtons();
+}
+
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(currentAbc);
+  const previous = undoStack.pop();
+  restoringHistory = true;
+  setAbc(previous);
+  restoringHistory = false;
+  lastPushWasTyping = false;
+  updateUndoRedoButtons();
+}
+
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(currentAbc);
+  const next = redoStack.pop();
+  restoringHistory = true;
+  setAbc(next);
+  restoringHistory = false;
+  lastPushWasTyping = false;
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  undoBtn.disabled = undoStack.length === 0;
+  redoBtn.disabled = redoStack.length === 0;
+}
+
+// New piece, opened score, restored version... none of those should be
+// "undoable back into" the previous unrelated piece - each starts its own
+// clean history.
+function resetUndoHistory() {
+  undoStack.length = 0;
+  redoStack.length = 0;
+  lastPushWasTyping = false;
+  updateUndoRedoButtons();
+}
+
+undoBtn.addEventListener("click", undo);
+redoBtn.addEventListener("click", redo);
+
 function setAbc(newAbc) {
+  const normalized = stripBlankLines(newAbc);
+  if (normalized !== currentAbc) pushUndoPoint(currentAbc);
   // Any text edit invalidates the selected notes' char offsets (and the
   // re-render below replaces their abcjs elements outright), so drop the
   // selection rather than let it point at the wrong text or a dead element.
   noteSelection = [];
-  currentAbc = stripBlankLines(newAbc);
+  currentAbc = normalized;
   abcTextarea.value = currentAbc;
   renderScore();
   syncPropertiesPanel();
   updateScoreTitleFromAbc();
   updateToolbarEnabled();
+  syncDrumGroup();
+  updateClipboardButtons();
 }
 
 // ===================== Note editor toolbar =====================
@@ -1902,7 +3425,9 @@ abcTextarea.addEventListener("click", trackCursor);
 abcTextarea.addEventListener("focus", trackCursor);
 
 abcTextarea.addEventListener("input", () => {
-  currentAbc = abcTextarea.value;
+  const newValue = abcTextarea.value;
+  if (newValue !== currentAbc) pushUndoPoint(currentAbc, { coalesceTyping: true });
+  currentAbc = newValue;
   cursorPos = abcTextarea.selectionStart;
   renderScore();
   syncPropertiesPanel();
@@ -1921,10 +3446,48 @@ function insertAtCursor(text) {
   }
 }
 
+// Add the dropped pitch to the note already under the cursor, turning it into
+// a chord. Returns false when the drop didn't land on a note, so the caller
+// can fall back to inserting a new one.
+function stackPitchOnNoteAt(clientX, clientY, dropResult) {
+  const hit = findScoreHit(clientX, clientY);
+  if (!hit || hit.kind !== "note") return false;
+  const parsed = parseNoteToken(currentAbc.slice(hit.startChar, hit.endChar));
+  if (!parsed || isRestBody(parsed.body)) return false;
+
+  const accidental = accidentalSelect.value;
+  parsed.body = pitchesToBody([...tokenPitches(parsed.body), accidental + absoluteToAbcPitch(dropResult.pitchAbsolute)]);
+  if (accidental) accidentalSelect.value = "";
+  setAbc(currentAbc.slice(0, hit.startChar) + buildNoteToken(parsed) + currentAbc.slice(hit.endChar));
+  return true;
+}
+
+// Plain click above/below an existing note - no palette tool needed, no
+// "Apilar en acorde" checkbox needed: it's just the fastest way to harmonize
+// a note you already wrote. Same duration as the note it lands on (it can
+// only ever be a chord tone of that note, never a new one of its own), and
+// whatever accidental is currently selected in "Alteración" applies to it
+// exactly like it would to a freshly placed note - so it's just as easy to
+// alter as the note it's attached to, both now and later (its own notehead
+// can be right-clicked afterwards like any other).
+// Clicking close enough to a pitch the chord already has just selects it
+// instead of stacking a redundant duplicate.
+function addChordToneAtClick(clientX, clientY) {
+  const hit = findScoreHit(clientX, clientY);
+  if (!hit || hit.kind !== "note") return false;
+  const result = computeDropInsertion(clientX, clientY);
+  if (!result) return false;
+  const parsed = parseNoteToken(currentAbc.slice(hit.startChar, hit.endChar));
+  if (!parsed || isRestBody(parsed.body)) return false;
+  const alreadyThere = tokenPitches(parsed.body).some((p) => abcTokenToAbsolute(p) === result.pitchAbsolute);
+  if (alreadyThere) return false;
+  return stackPitchOnNoteAt(clientX, clientY, result);
+}
+
 // Duration/rest palette: drag onto the score to place a note/rest exactly
 // where dropped (pitch = vertical position, time = horizontal position);
-// a plain click instead inserts at the text cursor with a neutral pitch (B)
-// that you can then drag up/down on the score to fix.
+// a plain click instead arms the chip - see setArmedPalette() - so the next
+// click on the score places it there.
 function setupNotePalette() {
   document.querySelectorAll(".palette-chip").forEach((btn) => {
     const kind = btn.dataset.kind;
@@ -1948,17 +3511,21 @@ function setupNotePalette() {
         onDrop: (dropZone, x, y) => {
           const result = computeDropInsertion(x, y);
           if (!result) return;
+          // "Apilar en acorde": dropping onto an existing note adds this pitch
+          // to it (a double note) instead of writing a new one beside it.
+          if (kind === "note" && document.getElementById("chord-mode").checked && stackPitchOnNoteAt(x, y, result)) return;
           insertPaletteItem(result.insertAt, kind, duration, result.pitchAbsolute);
         },
-        // Neutral pitch (B) that you can then drag up/down on the score to
-        // fix - goes through the same measure-fill logic as a drop so a
-        // click-inserted note also respects/closes the current bar.
-        onClick: () => insertPaletteItem(cursorPos, kind, duration, 6),
+        // A plain click (no drag) arms this chip instead of inserting right
+        // away: click on the staff afterward to place it there.
+        onClick: () => setArmedPalette({ kind, duration, label: btn.textContent, pitchToken: null, btn }),
       });
     });
   });
 }
 setupNotePalette();
+setupDrumPalette();
+updateClipboardButtons();
 
 // Quick-value chips for key/meter/tempo: drag onto the score to apply, or
 // just click.
@@ -2055,6 +3622,7 @@ async function compose() {
 
     currentScoreId = null;
     setAbc(data.abc);
+    resetUndoHistory();
     setStatus("¡Listo!");
     openPanel("panel-notes");
     addChatMessage("system", "Nueva pieza generada. Edítala con los paneles del lateral o pídeme cambios aquí.");
@@ -2094,6 +3662,7 @@ function startBlank() {
 
   currentScoreId = null;
   setAbc(abc);
+  resetUndoHistory();
   setStatus("Partitura en blanco lista para editar.");
   openPanel("panel-notes");
   addChatMessage("system", "Partitura en blanco creada, sin IA. Arrastra notas desde el panel de notas, o pídeme ayuda cuando quieras.");
@@ -2177,6 +3746,7 @@ function buildScoreRow(score, onChanged) {
       const data = await parseAuthResponse(await authFetch(`/api/scores/${score.id}`));
       currentScoreId = data.id;
       setAbc(data.abc);
+      resetUndoHistory();
       setStatus(`Partitura "${data.title}" abierta.`);
       closePanel("panel-library");
     } catch (err) {
@@ -2229,13 +3799,21 @@ document.querySelector('[data-panel="panel-library"]').addEventListener("click",
 document.getElementById("save-score-btn").addEventListener("click", async () => {
   if (!currentAbc.trim()) return;
   const { headers } = parseAbcHeaders(currentAbc);
-  const title = (headers.T || "").trim() || "Sin título";
+  const proposed = (headers.T || "").trim() || "Sin título";
+  const title = window.prompt("Título de la partitura:", proposed);
+  if (title === null) return; // cancelled
+  const finalTitle = title.trim() || "Sin título";
+
+  // Keep the ABC's own T: header in sync with whatever was confirmed here,
+  // so the title shown on the score matches what's shown in the library.
+  if (finalTitle !== proposed) setAbc(replaceHeaderLine(currentAbc, "T", finalTitle));
+
   try {
     const data = await parseAuthResponse(
       await authFetch("/api/scores", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, abc: currentAbc, score_id: currentScoreId }),
+        body: JSON.stringify({ title: finalTitle, abc: currentAbc, score_id: currentScoreId }),
       })
     );
     currentScoreId = data.id;
@@ -2243,6 +3821,46 @@ document.getElementById("save-score-btn").addEventListener("click", async () => 
   } catch (err) {
     setStatus(`Error al guardar: ${err.message}`, true);
   }
+});
+
+// Every time "Guardar" overwrites an already-saved score, the backend
+// archives what was there before (see scores_service.save_score) - this is
+// just a way to browse and reopen those snapshots, the same "Abrir"
+// interaction the library panel already uses for whole scores.
+versionsBtn.addEventListener("click", async () => {
+  if (!currentScoreId) {
+    setStatus("Guarda la partitura al menos una vez para tener versiones.", true);
+    return;
+  }
+  let versions;
+  try {
+    versions = await parseAuthResponse(await authFetch(`/api/scores/${currentScoreId}/versions`));
+  } catch (err) {
+    setStatus(`Error al listar versiones: ${err.message}`, true);
+    return;
+  }
+  if (!versions.length) {
+    setStatus("Esta partitura todavía no tiene versiones anteriores guardadas.");
+    return;
+  }
+  const rect = versionsBtn.getBoundingClientRect();
+  showContextMenu(
+    rect.left,
+    rect.bottom + 4,
+    versions.map((v) => ({
+      label: `${formatScoreDate(v.created_at)} · ${v.created_by_username || "?"}`,
+      onClick: async () => {
+        try {
+          const full = await parseAuthResponse(await authFetch(`/api/scores/${currentScoreId}/versions/${v.id}`));
+          setAbc(full.abc);
+          resetUndoHistory();
+          setStatus(`Versión del ${formatScoreDate(v.created_at)} cargada - pulsa Guardar para conservarla.`);
+        } catch (err) {
+          setStatus(`Error al abrir la versión: ${err.message}`, true);
+        }
+      },
+    }))
+  );
 });
 
 // ===================== Chat with AI =====================
